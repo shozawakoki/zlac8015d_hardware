@@ -1,79 +1,85 @@
 # zlac8015d_hardware
 
-ZLAC8015D モータドライバを ROS 2 の `ros2_control` から操作するための **SocketCAN / CANopen ハードウェアインターフェース**です。対向二輪型移動ロボットの左右駆動輪に対し、車輪角速度指令を受け取り、エンコーダ位置・実測角速度・モータ電流を `ros2_control` に提供します。
+ZLAC8015D モータドライバを、Linux SocketCAN / CANopen 経由で ROS 2 の `ros2_control` から操作するための **C++ ハードウェアインターフェース**です。対向二輪型移動ロボットの左右駆動輪に対して、速度指令とエンコーダ位置・実測角速度・モータ電流の取得を行います。
 
-ドライバ内蔵の速度制御を使う `velocity` モードと、左右の車輪に独立した一次 LADRC（線形拡張状態オブザーバを含む）を適用して電流を指令する `ladrc_torque` モードを実装しています。
+2種類の制御モードを実装しています。
 
-## 動作環境と依存関係
+| モード | 内容 | ドライバへの指令 |
+| --- | --- | --- |
+| `velocity` | ZLAC8015D 内蔵の速度制御を使用 | 車輪角速度 |
+| `ladrc_torque` | 左右車輪の一次 LADRC（線形拡張状態オブザーバ：LESO）で速度追従制御 | モータ電流 |
+
+ROS 2 側の**コマンドインターフェースは、両モードとも車輪角速度 `velocity` [rad/s]** です。`ladrc_torque` モードのみ、プラグイン内部で電流指令に変換します。
+
+この README は `main` の `src/zlac8015d_system.cpp`、ヘッダー、ビルド設定および [`zlac8015d_can_bringup`](https://github.com/shozawakoki/zlac8015d_can_bringup) の現行 URDF を基準にしています。**本実装に含まれない同定用プログラムやスクリプトの実行手順は掲載していません。**
+
+## 動作環境
 
 - Ubuntu 22.04 / ROS 2 Humble
-- ZLAC8015D モータドライバおよび対応する CAN インターフェース（Linux SocketCAN）
+- Linux SocketCAN、ZLAC8015D モータドライバ
 - C++17 / `ament_cmake`
-- ROS 2 パッケージ：`rclcpp`、`hardware_interface`、`pluginlib`
-- 解析スクリプト：Python 3、NumPy（`analyze_first_order.py` / `analyze_b0.py`）
-- 起動時に別パッケージ `zlac_can_bringup` を使用（同一ワークスペースに配置する場合）。
-
-`ros2_control`、コントローラおよび関連ツールが未導入の場合の例：
+- `rclcpp`、`hardware_interface`、`pluginlib`
+- 起動・差動二輪コントローラの設定に [`zlac8015d_can_bringup`](https://github.com/shozawakoki/zlac8015d_can_bringup) を使用
 
 ```bash
 sudo apt update
-sudo apt install ros-humble-ros2-control ros-humble-ros2-controllers \
-  ros-humble-robot-state-publisher python3-numpy can-utils
+sudo apt install ros-humble-ros2-control ros-humble-ros2-controllers ros-humble-robot-state-publisher python3-colcon-common-extensions can-utils
 ```
 
-> 実機の CAN ビットレート、モータ極性、エンコーダ仕様に依存します。下記の値は添付ソースに実装されている設定です。
-
-## ファイル構成
+## 現在のファイル構成
 
 ```text
 zlac8015d_hardware/
 ├── CMakeLists.txt
 ├── package.xml
+├── README.md
 ├── zlac8015d_hardware.xml
-├── include/zlac8015d_hardware/
-│   ├── zlac8015d_system.hpp
-│   └── ...                         # 旧版・バックアップ
-├── src/
-│   ├── zlac8015d_system.cpp       # ros2_control 実装
-│   ├── first_order_identification.cpp
-│   └── running_step_identification.cpp
-└── scripts/
-    ├── analyze_first_order.py
-    ├── analyze_b0.py
-    └── analyze_ladrc_step.py
+├── include/
+│   └── zlac8015d_hardware/
+│       ├── zlac8015d_system.hpp
+│       └── zlac8015d_system_before_breakaway.hpp
+└── src/
+    └── zlac8015d_system.cpp
 ```
 
-- `zlac8015d_system.cpp`：CANopen PDO 設定、状態読取り、速度・電流指令、LADRC、停止処理。
-- `zlac8015d_hardware.xml`：`pluginlib` に登録するハードウェアプラグインの定義。
-- `first_order_identification.cpp` / `running_step_identification.cpp`：独立した SocketCAN 電流切替実験プログラム。**この添付版では両ファイルの実装内容は同一です。**
-- `analyze_first_order.py`：実験 CSV から一次の速度ダイナミクスを推定。
-- `analyze_b0.py`：**別途取得した b0 同定用 CSV** を解析するスクリプト（対応する収録プログラムはこのZIPに含まれません）。
-- `analyze_ladrc_step.py`：専用のステップ試験CSV用解析スクリプト。通常運転ログ `/tmp/ladrc_track_200hz.csv` の形式とは異なります。
+| ファイル | 役割 |
+| --- | --- |
+| `src/zlac8015d_system.cpp` | SocketCAN、CANopen 通信、`ros2_control`、LADRC、起動・停止処理 |
+| `include/zlac8015d_hardware/zlac8015d_system.hpp` | 現行ハードウェアクラスの宣言 |
+| `include/zlac8015d_hardware/zlac8015d_system_before_breakaway.hpp` | 旧構造のヘッダー。現行 `.cpp` がインクルードするファイルではない |
+| `zlac8015d_hardware.xml` | `pluginlib` の登録情報 |
+
+`CMakeLists.txt` でライブラリ `zlac8015d_hardware` を生成します。**この `main` ブランチには独立したモデル同定実行ファイル、Python 解析スクリプト、`scripts/` ディレクトリはありません。** `ros2 run zlac8015d_hardware first_order_identification` 等は、このリポジトリの現在のビルドでは利用できません。
 
 ## インストールとビルド
 
-このパッケージと `zlac_can_bringup` を `~/ros2_ws/src/` に配置してから実行します。フォルダ名に `-devel-ADRC` などの接尾辞があっても、ROS 2 のパッケージ名は `zlac8015d_hardware` です。
-
 ```bash
 source /opt/ros/humble/setup.bash
+mkdir -p ~/ros2_ws/src
+cd ~/ros2_ws/src
+git clone https://github.com/shozawakoki/zlac8015d_hardware.git
+git clone https://github.com/shozawakoki/zlac8015d_can_bringup.git
 cd ~/ros2_ws
 colcon build --packages-select zlac8015d_hardware zlac_can_bringup --symlink-install
 source install/setup.bash
 ```
 
-ビルド後、プラグインは `zlac8015d_hardware/Zlac8015dSystemHardware` として URDF の `<ros2_control>` 要素から読み込まれます。
+クローン済みの場合は重複して取得せず、既存リポジトリの `main` を更新してからビルドしてください。プラグイン名は次のとおりです。
 
-## 基本的な起動・確認
+```xml
+<plugin>zlac8015d_hardware/Zlac8015dSystemHardware</plugin>
+```
 
-CAN インターフェースが既に適切なビットレートで設定されていることを確認します。
+## CAN の確認と起動
 
 ```bash
 ip -details link show can0
+candump can0
 ```
 
-`can0` が使用できない場合は、使用機器の CAN ビットレートと配線を確認してから設定してください。ビットレートは環境依存のため、このREADMEでは固定値を指定しません。
+`candump` は `Ctrl+C` で終了します。CAN ビットレートと機器の接続条件は環境依存のため、ここでは固定値を指定しません。本パッケージは CAN インターフェースの作成や故障した物理バスの復旧を行いません。
 
-ハードウェアを含む一式は bringup パッケージから起動します。
+bringup パッケージから起動します。
 
 ```bash
 source /opt/ros/humble/setup.bash
@@ -81,115 +87,141 @@ source ~/ros2_ws/install/setup.bash
 ros2 launch zlac_can_bringup zlac_can_bringup.launch.py
 ```
 
-別ターミナルでの確認例：
+別ターミナルで以下を確認します。
 
 ```bash
 source /opt/ros/humble/setup.bash
 source ~/ros2_ws/install/setup.bash
 ros2 control list_controllers
 ros2 topic echo /joint_states
+ros2 topic echo /odom
 ```
 
-CAN フレームを直接確認するには `candump can0` を使用できます。停止は `Ctrl+C` です。
+最初の試験では車輪を浮かせ、非常停止手段を確保してください。`ros2_control` と同じ CANopen ノードを操作する別プログラムを同時に起動しないでください。
 
-## 制御モード
+## ROS 2 とドライバのインターフェース
 
-`zlac_can_bringup/urdf/orange_go_2025.urdf` の `<hardware>` 内で切り替えます。
-
-| `control_mode` | 概要 | ドライバへ送る指令 |
+| ジョイント | コマンド | 状態 |
 | --- | --- | --- |
-| `velocity` | ドライバ内蔵の速度制御を使用 | 目標角速度（`0x300 + node_id`） |
-| `ladrc_torque` | 左右の一次 LADRC により車輪角速度を追従 | 電流指令（`0x200 + node_id`） |
+| `left_wheel_joint` | `velocity` [rad/s] | `position` [rad]、`velocity` [rad/s]、`effort` |
+| `right_wheel_joint` | `velocity` [rad/s] | `position` [rad]、`velocity` [rad/s]、`effort` |
 
-どちらのモードも **ROS側のコマンドインターフェースは車輪角速度 `velocity` [rad/s]** です。`ladrc_torque` では、ハードウェアプラグイン内で角速度の目標値を電流指令へ変換します。`diff_drive_controller` の設定を変更せず切り替えられます。
+本実装の `effort` は、慣例的なトルク [N·m] ではなく、**実測モータ電流 [A]** を格納します。右車輪はドライバと ROS 2 で正方向が一致しますが、左車輪では角速度・電流・エンコーダ位置・指令の符号を反転して、ROS 2 の前進方向に合わせています。
 
-LADRC モードでは概念的に次を使用します。
+エンコーダ換算は実装上 **1024 line × 4 = 4096 count/rev** です。位置は最初に受信したエンコーダ値を原点として積算し、32-bit カウンタの折返しを考慮しています。ハードウェアの再起動で原点が変わるため、オドメトリの継続性には注意してください。
+
+## 現在の設定パラメータ
+
+制御モードとゲインは bringup リポジトリの `urdf/orange_go_2025.urdf` 内、`<ros2_control><hardware>` で設定します。
+
+| パラメータ | 現行 URDF 値 | 内容 |
+| --- | --- | --- |
+| `can_interface` | `can0` | SocketCAN デバイス |
+| `node_id` | `1` | CANopen ノード ID（1～127） |
+| `control_mode` | `ladrc_torque` | `velocity` / `ladrc_torque` |
+| `ladrc_b0_left` | `18.0` | 左車輪の公称入力ゲイン [(rad/s²)/A] |
+| `ladrc_b0_right` | `18.0` | 右車輪の公称入力ゲイン [(rad/s²)/A] |
+| `ladrc_wc` | `5.0` | 制御帯域幅 [rad/s] |
+| `ladrc_wo` | `20.0` | LESO 帯域幅 [rad/s] |
+| `current_limit_a` | `8.0` | TRACK 電流指令の絶対値上限 [A] |
+| `current_rate_limit_a_per_s` | `20.0` | TRACK 電流の変化率上限 [A/s] |
+| `feedback_timeout_ms` | `30.0` | 速度受信のタイムアウト閾値 [ms] |
+
+`b0` は機体・運転条件に合わせた同定結果を適用してください。`18.0` は現在の URDF に記載された公称値です。**静止摩擦対策に用いる BREAKAWAY 電流ランプは C++ ソースに定数として定義されています。** また、一部の後段処理では電流変化率制限より優先して電流を変更するため、すべてのフェーズで設定された `current_rate_limit_a_per_s` が適用されるわけではありません。
+
+## LADRC による電流指令
+
+各車輪の制御対象を、運転中の近似として
 
 ```text
 omega_dot = f + b0 * I_cmd
 ```
 
-各車輪の ESO が角速度と総外乱を推定し、制御器が電流指令を計算します。実装には起動時の静止摩擦対策（BREAKAWAY → TRACK）、その場旋回時の両輪協調、直進時の同期補正、通常停止時の減速ランプおよび電流制限が含まれます。
+で扱います。`omega` は車輪角速度、`I_cmd` は電流指令、`f` はモデル化されないダイナミクスや外乱をまとめた総外乱です。TRACK 中、LESO は
 
-## URDFで設定するパラメータ
+```text
+e      = omega_measured - z1
+z1_dot = z2 + b0 * I_previous_cmd + 2 * wo * e
+z2_dot = wo^2 * e
+```
 
-添付された `orange_go_2025.urdf` の初期設定値です。
+を陽的オイラー法で更新し、電流指令を
 
-| パラメータ | 値 | 説明 |
-| --- | ---: | --- |
-| `can_interface` | `can0` | SocketCAN インターフェース |
-| `node_id` | `1` | CANopen ノード ID（1〜127） |
-| `control_mode` | `ladrc_torque` | 制御モード |
-| `ladrc_b0_left` | `20.0` | 左車輪の公称入力ゲイン [(rad/s²)/A] |
-| `ladrc_b0_right` | `20.0` | 右車輪の公称入力ゲイン [(rad/s²)/A] |
-| `ladrc_wc` | `5.0` | 制御帯域幅 [rad/s] |
-| `ladrc_wo` | `20.0` | オブザーバ帯域幅 [rad/s] |
-| `current_limit_a` | `8.0` | 電流指令の上限 [A] |
-| `current_rate_limit_a_per_s` | `20.0` | 電流指令の変化率上限 [A/s] |
-| `feedback_timeout_ms` | `30.0` | LADRC モードの速度フィードバック受信タイムアウト [ms] |
+```text
+I_raw = (wc * (omega_reference - z1) + a_ff - z2) / b0
+```
 
-`b0`、電流制限、極性は実機特性に合わせて確認してください。**`20.0` は添付URDFの設定値であり、すべての機体に適した同定済みパラメータであることを保証する値ではありません。**
+から計算します。`a_ff` は通常走行では 0、通常停止時の減速ランプでは減速度フィードフォワードです。`I_previous_cmd` は実測電流ではなく、**前制御周期に指令した電流**です。実測電流は別途 CAN から取得して状態・CSV に記録します。
 
-## CANopenの入出力
+### 起動時の静止摩擦対策（BREAKAWAY → TRACK）
 
-ノード ID が `1` の場合、主な CAN ID は次のとおりです。
+停止状態から電流を増やして回転開始を確認し、その後に通常の LADRC に切り替えます。
 
-| CAN ID | 方向 | 内容 |
+- BREAKAWAY：`0.65 A` から開始し、内部の制御カウントが進むと `0.50 A` ずつ増加。実装上の上限 `8.0 A`。
+- 単輪の TRACK 移行条件：指令方向の実測角速度が `0.30 rad/s` 以上の状態で `20` 制御サンプル継続。
+- TRACK_HOLD：移行直後 `30` サンプルを用いて起動電流から通常の電流下限 `0.20 A` へ移行。
+- STALL 検出：指令方向の角速度が `0.10 rad/s` 未満の状態で `20` サンプル継続すると BREAKAWAY に戻ります。
+
+上記のサンプル数は制御ループ **200 Hz** を前提とした実装上のカウント値です。例えば `20` サンプルは公称 `100 ms` です。実際の経過時間はスケジューリング等の影響を受けます。
+
+その場旋回（左右車輪が逆方向でほぼ同速）の場合は、左右がともに始動条件を満たすまで TRACK 移行を協調させます。直進時は、両輪が TRACK と TRACK_HOLD を終えた後に、左右速度差を使った同期補正を段階的に加えます。この補正は旋回や停止中には適用しません。
+
+### 通常停止
+
+`ladrc_torque` モードで左右の目標車輪角速度がゼロになると、`write()` 内部で**急停止ではなく通常減速ランプ**を開始します。
+
+- 車体並進減速度の設定値：`1.0 m/s²`（ソース内定数）。
+- 車輪半径 `0.064 m` に対応する車輪角減速度：`15.625 rad/s²`。
+- 両車輪の実測角速度が `0.50 rad/s` 以下になったら、電流ゼロを保持する ZERO HOLD に移行。
+- 次の非ゼロ速度指令が入ると ZERO HOLD を解除。
+
+CiA402 Quick Stop 用のパラメータ設定は初期化コードに存在しますが、**通常のゼロ速度指令では Quick Stop を発行しません**。異常時の安全停止がハードウェアで保証されているという意味ではありません。
+
+## CANopen PDO と更新設定
+
+CANopen ノード ID が `1` の場合：
+
+| CAN ID | 方向 | データ |
 | --- | --- | --- |
-| `0x181` | ドライバ → PC | 左右の実測角速度（各32 bit、0.1 rpm単位） |
-| `0x281` | ドライバ → PC | 左右の実測電流（各16 bit、0.1 A単位） |
-| `0x381` | ドライバ → PC | 左右のエンコーダ位置（各32 bit） |
-| `0x301` | PC → ドライバ | 速度指令（`velocity` モード） |
-| `0x201` | PC → ドライバ | 電流指令（`ladrc_torque` モード） |
-| `0x601` | PC → ドライバ | SDO要求 |
+| `0x181` | ZLAC8015D → PC | 左右実測角速度（各 `int32`、0.1 rpm 単位） |
+| `0x281` | ZLAC8015D → PC | 左右実測電流（各 `int16`、0.1 A 単位） |
+| `0x381` | ZLAC8015D → PC | 左右エンコーダ位置（各 `int32`、count） |
+| `0x301` | PC → ZLAC8015D | 目標速度（`velocity` モード） |
+| `0x201` | PC → ZLAC8015D | 左右目標電流（`ladrc_torque`、各 `int16`、mA 単位） |
+| `0x601` | PC → ZLAC8015D | SDO 設定コマンド |
 
-初期化時に NMT / SDO を用いて PDO マッピングとドライバ動作モードを設定します。ソースのイベントタイマ設定値は角速度・電流が `10 ms`、エンコーダ位置が `40 ms` です。実際の受信周期は機器・バス状態に依存します。
+起動時に NMT / SDO を使って PDO マッピング、動作モード（Profile Velocity = `3` または Profile Torque = `4`）、CiA402 の初期設定を送信します。
 
-エンコーダ換算は **1024 line × 4 = 4096 count/rev** です。左右の正方向が一致するように、左モータの符号を反転しています。エンコーダ位置は初回受信時を原点とする相対位置なので、**launchやハードウェアの再起動で位置が再初期化されます**。
+現在の実装が TPDO イベントタイマへ**書き込む値**は、実測角速度と電流がともに `10 ms`、位置が `40 ms` です。実際の受信周期はドライバの応答・設定状態・CAN バスの状況に依存するため、`candump` で確認してください。なお、C++ のログメッセージやコメントには `5 ms / 20 ms` と記載された箇所があり、**イベントタイマへ送信する値と不一致**です。ソースを変更せず、この相違を明記しています。
 
-## 運転ログ
+## フィードバック監視とログ
 
-`ladrc_torque` モードで通常の制御処理が動作している間、以下のCSVを出力します。
+`ladrc_torque` では、未受信の速度フィードバックがある場合はゼロ電流指令を試みます。最終受信から `feedback_timeout_ms` を超えると、ゼロ電流指令の送信を試みて `ros2_control` にエラーを返します。**CAN 断線時はゼロ電流フレーム自体が届かない可能性があるため、安全停止を保証するものではありません。** `velocity` モードには、この LADRC 固有のフィードバック監視は適用されません。
+
+LADRC 実行ログの出力先：
 
 ```text
 /tmp/ladrc_track_200hz.csv
 ```
 
-収録列には目標・実測角速度、車輪位置、電流指令・実測電流、ESO 推定値 `z1` / `z2`、BREAKAWAY / TRACK 関連情報が含まれます。ファイルは起動後に新規作成され、200サンプルごとにフラッシュされます。**`velocity` モードではこのLADRCログは出力されません。**
+CSV は実装上、目標・実測角速度、位置、指令電流・実測電流、LESO 推定 `z1` / `z2`、TRACK フラグ、BREAKAWAY 目標電流を収録します。通常は `200` サンプルごとにフラッシュされます。`velocity` モードではこの CSV は生成しません。ログファイル名の `200hz` は公称制御レートに基づきます。
 
-## 電流切替によるモデル同定（オプション）
-
-`first_order_identification` は `ros2_control` とは独立してモータを直接操作するため、**bringupを終了し、車輪を浮かせた状態でのみ**実行してください。
+ログ確認：
 
 ```bash
-source /opt/ros/humble/setup.bash
-source ~/ros2_ws/install/setup.bash
-
-ros2 run zlac8015d_hardware first_order_identification \
-  --run --can can0 --node 1 \
-  --initial-current 2.0 --switched-current 3.0 \
-  --switch-speed 8.0 --speed-limit 15.0 \
-  --max-current 3.0 --repeats 5 \
-  --output running_step_2A_3A.csv
+head -n 5 /tmp/ladrc_track_200hz.csv
+tail -n 5 /tmp/ladrc_track_200hz.csv
 ```
-
-生成されたCSVに対して一次モデルの解析を実施します。
-
-```bash
-python3 ~/ros2_ws/src/zlac8015d_hardware/scripts/analyze_first_order.py \
-  running_step_2A_3A.csv --output first_order_fit.csv
-```
-
-> 上の解析スクリプトのパスは、ソースフォルダを `zlac8015d_hardware` という名前に配置した場合の例です。実際のフォルダ名に読み替えてください。`--run` 指定時はモータが動作します。実機の電流上限・安全条件に合わせて数値を調整してください。
 
 ## 安全上の注意
 
-- `feedback_timeout_ms` による速度データの鮮度確認は **LADRCモードの内部処理**です。通信断の原因を修復するものではありません。
-- 受信停止時にはゼロ指令を試みますが、**CAN配線の断線・電源異常時にモータが物理的に停止することは本ソフトだけでは保証できません**。非常停止回路およびドライバの保護設定を別途用意してください。
-- 同定プログラムと `ros2_control` を同時起動しないでください。どちらも同じドライバを初期化・操作します。
-- 実機への適用前に車輪を浮かせてモータ回転方向、停止挙動、エンコーダ更新を確認してください。
-- 自動再起動を追加する場合は、別プログラム `can_launch_watchdog.py` を使用できます（この最初の hardware ZIP には含まれていません）。
+- **モータを動かす前に非常停止手段を確保**し、初回は車輪を浮かせて回転方向・停止挙動を確認してください。
+- `current_limit_a` は主として TRACK の電流指令を制限します。BREAKAWAY 電流や内部の特別な処理を含めた包括的な安全制限ではありません。ソフトウェア側とドライバ側の許容電流を必ず確認してください。
+- CANopen ノード、モータ配線、符号、エンコーダ分解能が異なる環境では、実装を検証してから使用してください。
+- 同定用などの独立した CAN 操作プログラムと bringup を同時実行しないでください。
+- CAN 断線、ドライバ故障、PC 停止時の安全はこのソフトウェアだけでは保証できません。非常停止回路、ドライバの保護機能を別途用意してください。
+- `can_launch_watchdog.py` はこのリポジトリにはありません。別途用いる場合は bringup の二重起動を避け、再起動に伴うオドメトリ原点の変化を考慮してください。
 
 ## ライセンス
 
-添付された `package.xml` のライセンス欄は `TODO` のままです。GitHubで公開する際は権利関係を確認し、適切な `LICENSE` ファイルとライセンス表記を追加してください。
+現行 `package.xml` のライセンス欄は `TODO` です。公開・再利用条件は正式なライセンス表記が設定されるまで未確定です。
