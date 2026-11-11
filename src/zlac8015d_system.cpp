@@ -587,7 +587,7 @@ hardware_interface::return_type Zlac8015dSystemHardware::write(
   // ==========================================================
   // 200 Hz LADRC/PID runtime CSV logger
   //
-  // Called from both normal LADRC operation and Quick Stop.
+  // Observer columns in PID mode are diagnostics, not LESO estimates.
   // ==========================================================
   auto log_ladrc_runtime =
     [&](const double cmd_current_l,
@@ -671,7 +671,7 @@ hardware_interface::return_type Zlac8015dSystemHardware::write(
       }
     };
 
-  // LADRC torque mode requires fresh velocity feedback.
+  // LADRC and PID current modes require fresh wheel-speed feedback.
   if (!velocity_feedback_received_) {
     send_zero_command();
     return hardware_interface::return_type::OK;
@@ -1187,8 +1187,7 @@ constexpr int COORDINATED_READY_SAMPLES = 5;            // 100 ms @ 200 Hz
   // Zero velocity reference:
   // reset LADRC state and command zero current.
   //
-  // Actual stopping is handled by the driver-side Quick Stop
-  // in write().
+  // Normal stopping uses the controlled deceleration ramp in write().
   // ----------------------------------------------------------
 
   if (std::abs(velocity_reference) <= REF_ZERO) {
@@ -1291,7 +1290,7 @@ constexpr int COORDINATED_READY_SAMPLES = 5;            // 100 ms @ 200 Hz
     // If the wheel required more than READY_WAIT_A to become READY,
     // keep that larger value.
 
-    // Increase target by BREAKAWAY_STEP_A every 200 ms only while
+    // Increase target every BREAKAWAY_STEP_SAMPLES cycles only while
     // this wheel is not yet ready.
     if (!coordinated_ready &&
         state.breakaway_count > 0 &&
@@ -1310,7 +1309,8 @@ constexpr int COORDINATED_READY_SAMPLES = 5;            // 100 ms @ 200 Hz
       static_cast<double>(direction) *
       state.breakaway_target;
 
-    state.last_current_cmd = breakaway_current;
+    state.last_current_cmd = clamp(
+      breakaway_current, -current_limit_a_, current_limit_a_);
 
 
     if (allow_track_transition &&
@@ -1519,10 +1519,10 @@ constexpr int COORDINATED_READY_SAMPLES = 5;            // 100 ms @ 200 Hz
     static_cast<double>(direction) *
     current_command;
 
-  // Apply the TRACK current floor only when the ORIGINAL LADRC
+  // Apply the TRACK current floor only when the ORIGINAL controller
   // request is drive torque in the commanded direction.
   //
-  // If raw LADRC requests braking torque, do not apply the floor.
+  // If the controller requests braking torque, do not apply the floor.
   // The slew-rate limiter can then move the command gradually
   // through zero into braking current.
   if (!normal_stop_ramp_active_ &&
