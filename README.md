@@ -114,6 +114,14 @@ ros2 topic echo /odom
 
 制御モードとゲインは bringup リポジトリの `urdf/orange_go_2025.urdf` 内、`<ros2_control><hardware>` で設定します。
 
+### 対応する bringup の車輪・オドメトリ設定
+
+最新の [`zlac8015d_can_bringup/config/controllers.yaml`](https://github.com/shozawakoki/zlac8015d_can_bringup/blob/main/config/controllers.yaml) では、実機で確認した有効車輪間距離 `wheel_separation: 0.354` [m]、車輪半径 `wheel_radius: 0.064` [m] を使用します。`orange_go_2025.urdf` の左右車輪ジョイントの Y 座標はそれぞれ `+0.177` / `-0.177` [m] です。
+
+車輪寸法と速度指令の変換・車輪オドメトリ計算は bringup 側の `diff_drive_controller` が担当します。本ハードウェアプラグインが受け取る指令は車輪角速度 [rad/s] であり、上記 `wheel_separation` を直接読み込みません。
+
+実機では左モータの符号調整が完了しています。また GPS・IMU を利用した外部の位置推定系でロボット位置を扱っていますが、本プラグインのエンコーダ位置は起動ごとに相対原点へ初期化されます。外部位置推定系自体はこれら2つのリポジトリに含まれません。
+
 | パラメータ | 現行 URDF 値 | 内容 |
 | --- | --- | --- |
 | `can_interface` | `can0` | SocketCAN デバイス |
