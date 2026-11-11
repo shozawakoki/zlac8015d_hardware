@@ -1320,6 +1320,11 @@ constexpr int COORDINATED_READY_SAMPLES = 5;            // 100 ms @ 200 Hz
 
 
   // ==========================================================
+  // TRACK: select LADRC or PID. Share output limits, hold and stall.
+  // ==========================================================
+  double raw_current_request = 0.0;
+  if (control_mode_ == ControlMode::LADRC_TORQUE) {
+  // ==========================================================
   // TRACK: LESO
   // ==========================================================
 
@@ -1387,12 +1392,57 @@ constexpr int COORDINATED_READY_SAMPLES = 5;            // 100 ms @ 200 Hz
   // Its sign is important: if LADRC requests current opposite
   // to the commanded motion, the controller is asking for
   // braking torque.  TRACK current floor must not prevent that.
-  const double raw_ladrc_current_command =
-    (desired_acceleration - state.z2) /
-    state.b0;
+  raw_current_request = (desired_acceleration - state.z2) / state.b0;
+  } else {
+    // PID current output [A] from wheel-speed error [rad/s].
+    // Differentiation on measured speed prevents reference-step kick.
+    state.z1 = velocity_measured; // diagnostic, not an LESO estimate
+    state.z2 = 0.0;
+    state.initialized = true;
 
-  double current_command =
-    raw_ladrc_current_command;
+    if (!pid_state.initialized) {
+      pid_state.previous_velocity = velocity_measured;
+      pid_state.filtered_velocity_derivative = 0.0;
+      pid_state.integral_current = 0.0;
+      pid_state.initialized = true;
+    }
+    const double measured_derivative =
+      (velocity_measured - pid_state.previous_velocity) / dt;
+    pid_state.previous_velocity = velocity_measured;
+    const double alpha = dt / (pid_derivative_filter_tau_s_ + dt);
+    pid_state.filtered_velocity_derivative += alpha *
+      (measured_derivative - pid_state.filtered_velocity_derivative);
+
+    const double error = velocity_reference - velocity_measured;
+    const double p_current = pid_kp_ * error;
+    const double d_current =
+      -pid_kd_ * pid_state.filtered_velocity_derivative;
+    const double tentative =
+      p_current + pid_state.integral_current + d_current;
+    // Conditional-integration anti-windup for current amplitude limits.
+    const bool pushing_positive =
+      tentative >= current_limit_a_ && error > 0.0;
+    const bool pushing_negative =
+      tentative <= -current_limit_a_ && error < 0.0;
+    if (!pushing_positive && !pushing_negative &&
+        !normal_stop_ramp_active_) {
+      pid_state.integral_current = clamp(
+        pid_state.integral_current + pid_ki_ * error * dt,
+        -current_limit_a_, current_limit_a_);
+    }
+    raw_current_request =
+      p_current + pid_state.integral_current + d_current;
+
+    // Normal stop: same deceleration acceleration feedforward as LADRC,
+    // converted into commanded current using the configured b0.
+    if (normal_stop_ramp_active_ && std::abs(velocity_reference) > 1.0e-6) {
+      constexpr double STOP_DECEL_RAD_S2 = 15.625;
+      raw_current_request -=
+        std::copysign(STOP_DECEL_RAD_S2 / state.b0, velocity_reference);
+    }
+  }
+
+  double current_command = raw_current_request;
 
 
   // TRACK Imax
@@ -1449,7 +1499,7 @@ constexpr int COORDINATED_READY_SAMPLES = 5;            // 100 ms @ 200 Hz
   // positive/forward current floor.
   const double raw_current_in_command_direction =
     static_cast<double>(direction) *
-    raw_ladrc_current_command;
+    raw_current_request;
 
   const double current_in_command_direction =
     static_cast<double>(direction) *
