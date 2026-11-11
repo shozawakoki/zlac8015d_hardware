@@ -13,6 +13,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <cstdlib>
 #include <fstream>
 #include <iomanip>
 #include <limits>
@@ -116,16 +117,28 @@ hardware_interface::CallbackReturn Zlac8015dSystemHardware::on_init(
     }
     node_id_ = static_cast<uint8_t>(node_id);
 
-    const std::string mode =
+    std::string mode =
       get_string_parameter(info_, "control_mode", "velocity");
+    // Allows selection at ros2 launch without modifying the bringup URDF.
+    // Mode changes require a stop/restart, not a live motor-mode switch.
+    if (const char * env_mode = std::getenv("ZLAC_CONTROL_MODE")) {
+      if (*env_mode != '\0') { mode = env_mode; }
+    }
     if (mode == "velocity") {
       control_mode_ = ControlMode::VELOCITY;
     } else if (mode == "ladrc_torque") {
       control_mode_ = ControlMode::LADRC_TORQUE;
+    } else if (mode == "pid_torque") {
+      control_mode_ = ControlMode::PID_TORQUE;
     } else {
       throw std::runtime_error(
-        "control_mode must be 'velocity' or 'ladrc_torque'");
+        "control_mode must be 'velocity', 'ladrc_torque', or 'pid_torque'");
     }
+    pid_kp_ = get_double_parameter(info_, "pid_kp", 0.7);
+    pid_ki_ = get_double_parameter(info_, "pid_ki", 0.5);
+    pid_kd_ = get_double_parameter(info_, "pid_kd", 0.03);
+    pid_derivative_filter_tau_s_ =
+      get_double_parameter(info_, "pid_derivative_filter_tau_s", 0.05);
 
     left_ladrc_.b0 = get_double_parameter(info_, "ladrc_b0_left", 1.0);
     right_ladrc_.b0 = get_double_parameter(info_, "ladrc_b0_right", 1.0);
@@ -154,6 +167,17 @@ hardware_interface::CallbackReturn Zlac8015dSystemHardware::on_init(
     return hardware_interface::CallbackReturn::ERROR;
   }
 
+  if (!std::isfinite(pid_kp_) || !std::isfinite(pid_ki_) ||
+      !std::isfinite(pid_kd_) ||
+      !std::isfinite(pid_derivative_filter_tau_s_) ||
+      pid_kp_ < 0.0 || pid_ki_ < 0.0 || pid_kd_ < 0.0 ||
+      (pid_kp_ + pid_ki_ + pid_kd_) <= 0.0 ||
+      pid_derivative_filter_tau_s_ <= 0.0)
+  {
+    RCLCPP_ERROR(rclcpp::get_logger("Zlac8015dSystemHardware"),
+      "Invalid PID gains or derivative filter constant.");
+    return hardware_interface::CallbackReturn::ERROR;
+  }
   raw_position_left_ = 0;
   raw_position_right_ = 0;
   last_raw_position_left_ = 0;
@@ -166,11 +190,14 @@ hardware_interface::CallbackReturn Zlac8015dSystemHardware::on_init(
   feedback_timeout_reported_ = false;
   left_ladrc_ = LadrcState{0.0, 0.0, left_ladrc_.b0, 0.0, false};
   right_ladrc_ = LadrcState{0.0, 0.0, right_ladrc_.b0, 0.0, false};
+  left_pid_ = PidState{};
+  right_pid_ = PidState{};
 
   RCLCPP_INFO(
     rclcpp::get_logger("Zlac8015dSystemHardware"),
     "Configured mode=%s, CAN=%s, node=%u, wc=%.3f, wo=%.3f, Imax=%.3f A",
-    control_mode_ == ControlMode::VELOCITY ? "velocity" : "ladrc_torque",
+    control_mode_ == ControlMode::VELOCITY ? "velocity" :
+      (control_mode_ == ControlMode::PID_TORQUE ? "pid_torque" : "ladrc_torque"),
     can_interface_.c_str(),
     static_cast<unsigned>(node_id_),
     controller_bandwidth_, observer_bandwidth_, current_limit_a_);
@@ -255,6 +282,14 @@ hardware_interface::CallbackReturn Zlac8015dSystemHardware::on_activate(
   right_ladrc_.track_hold_count = 0;
   right_ladrc_.track_hold_start = 0.20;
   right_ladrc_.direction_sign = 0;
+  left_pid_ = PidState{};
+  right_pid_ = PidState{};
+  sync_track_count_ = 0;
+  normal_stop_ramp_active_ = false;
+  normal_stop_ref_left_ = 0.0;
+  normal_stop_ref_right_ = 0.0;
+  zero_stop_hold_ = false;
+  quick_stop_active_ = false;
 
   const uint32_t sdo_id = 0x600u + node_id_;
 
@@ -353,8 +388,9 @@ hardware_interface::CallbackReturn Zlac8015dSystemHardware::on_activate(
 
   RCLCPP_INFO(
     rclcpp::get_logger("Zlac8015dSystemHardware"),
-    "Activated %s mode. Velocity/current TPDO period=5 ms, position TPDO period=20 ms.",
-    control_mode_ == ControlMode::VELOCITY ? "velocity" : "LADRC torque");
+    "Activated %s mode. TPDO event timer: velocity/current=10, position=40.",
+    control_mode_ == ControlMode::VELOCITY ? "velocity" :
+      (control_mode_ == ControlMode::PID_TORQUE ? "PID torque" : "LADRC torque"));
 
   if (control_mode_ == ControlMode::LADRC_TORQUE) {
     RCLCPP_INFO(
@@ -363,6 +399,10 @@ hardware_interface::CallbackReturn Zlac8015dSystemHardware::on_activate(
       left_ladrc_.b0, right_ladrc_.b0,
       controller_bandwidth_, observer_bandwidth_,
       current_limit_a_, current_rate_limit_a_per_s_);
+  } else if (control_mode_ == ControlMode::PID_TORQUE) {
+    RCLCPP_INFO(rclcpp::get_logger("Zlac8015dSystemHardware"),
+      "PID: Kp=%.3f Ki=%.3f Kd=%.3f tau=%.3f s Imax=%.2f A",
+      pid_kp_, pid_ki_, pid_kd_, pid_derivative_filter_tau_s_, current_limit_a_);
   }
 
   return hardware_interface::CallbackReturn::SUCCESS;
@@ -854,7 +894,7 @@ hardware_interface::return_type Zlac8015dSystemHardware::write(
   constexpr int SYNC_DELAY_SAMPLES = 100;
   constexpr int SYNC_RAMP_SAMPLES  = 100;
 
-  static int sync_track_count = 0;
+  // Synchronization counter is owned by the hardware instance.
 
   const bool straight_command =
     (control_ref_l * control_ref_r > 0.0) &&
@@ -885,14 +925,14 @@ hardware_interface::return_type Zlac8015dSystemHardware::write(
   {
     if (sync_error_in_range)
     {
-      ++sync_track_count;
+      ++sync_track_count_;
 
       double sync_gain = 0.0;
 
-      if (sync_track_count > SYNC_DELAY_SAMPLES)
+      if (sync_track_count_ > SYNC_DELAY_SAMPLES)
       {
         const int ramp_count =
-          sync_track_count - SYNC_DELAY_SAMPLES;
+          sync_track_count_ - SYNC_DELAY_SAMPLES;
 
         const double ramp_ratio =
           clamp(
@@ -912,25 +952,25 @@ hardware_interface::return_type Zlac8015dSystemHardware::write(
         sync_gain * sync_error;
     }
     // If |sync_error| > 0.60 rad/s:
-    // suspend synchronization, but preserve sync_track_count.
+    // suspend synchronization, but preserve sync_track_count_.
   }
   else
   {
     // Reset only when straight-line synchronization itself
     // is no longer eligible.
-    sync_track_count = 0;
+    sync_track_count_ = 0;
   }
 
-  double cmd_current_l = compute_ladrc_current(
-    left_ladrc_,
+  double cmd_current_l = compute_current_command(
+    left_ladrc_, left_pid_,
     ladrc_ref_l,
     hw_velocities_[0],
     current_l_measured,
     dt,
     allow_independent_track);
 
-  double cmd_current_r = compute_ladrc_current(
-    right_ladrc_,
+  double cmd_current_r = compute_current_command(
+    right_ladrc_, right_pid_,
     ladrc_ref_r,
     hw_velocities_[1],
     current_r_measured,
@@ -1040,6 +1080,8 @@ hardware_interface::return_type Zlac8015dSystemHardware::write(
 
     reset_to_breakaway(
       right_ladrc_, hw_velocities_[1], direction_r);
+    left_pid_ = PidState{};
+    right_pid_ = PidState{};
 
     cmd_current_l =
       static_cast<double>(direction_l) *
@@ -1049,6 +1091,12 @@ hardware_interface::return_type Zlac8015dSystemHardware::write(
       static_cast<double>(direction_r) *
       COORDINATED_BREAKAWAY_START_A;
   }
+
+  // Final absolute current cap applies to every start/track/turn state.
+  cmd_current_l = clamp(cmd_current_l, -current_limit_a_, current_limit_a_);
+  cmd_current_r = clamp(cmd_current_r, -current_limit_a_, current_limit_a_);
+  left_ladrc_.last_current_cmd = cmd_current_l;
+  right_ladrc_.last_current_cmd = cmd_current_r;
 
   // ZLAC command convention on this robot: left sign is opposite to ROS-forward.
   const int16_t cmd_l_ma = static_cast<int16_t>(
@@ -1087,8 +1135,9 @@ hardware_interface::return_type Zlac8015dSystemHardware::write(
   return hardware_interface::return_type::OK;
 }
 
-double Zlac8015dSystemHardware::compute_ladrc_current(
+double Zlac8015dSystemHardware::compute_current_command(
   LadrcState & state,
+  PidState & pid_state,
   const double velocity_reference,
   const double velocity_measured,
   const double current_measured,
@@ -1100,7 +1149,7 @@ double Zlac8015dSystemHardware::compute_ladrc_current(
 
   constexpr double BREAKAWAY_START_A = 0.65;
   constexpr double BREAKAWAY_STEP_A = 0.50;
-  constexpr double BREAKAWAY_MAX_A   = 8.00;
+  const double BREAKAWAY_MAX_A = std::min(8.00, current_limit_a_);
 
   // During coordinated in-place BREAKAWAY, a wheel that has
   // already satisfied the start condition waits at this current
@@ -1145,6 +1194,7 @@ constexpr int COORDINATED_READY_SAMPLES = 5;            // 100 ms @ 200 Hz
     state.track_hold_start = TRACK_FLOOR_A;
 
     state.direction_sign = 0;
+    pid_state = PidState{};
 
     return 0.0;
   }
@@ -1179,6 +1229,7 @@ constexpr int COORDINATED_READY_SAMPLES = 5;            // 100 ms @ 200 Hz
 
     state.track_hold_count = 0;
     state.track_hold_start = TRACK_FLOOR_A;
+    pid_state = PidState{};
   }
 
   state.direction_sign = direction;
@@ -1189,6 +1240,8 @@ constexpr int COORDINATED_READY_SAMPLES = 5;            // 100 ms @ 200 Hz
   // ==========================================================
 
   if (!state.tracking) {
+    // No PID integrator accumulation while breaking static friction.
+    pid_state = PidState{};
 
     // Freeze/reset ESO during BREAKAWAY.
     state.z1 = velocity_measured;
@@ -1232,7 +1285,7 @@ constexpr int COORDINATED_READY_SAMPLES = 5;            // 100 ms @ 200 Hz
     {
       state.breakaway_target = clamp(
         state.breakaway_target + BREAKAWAY_STEP_A,
-        BREAKAWAY_START_A,
+        std::min(BREAKAWAY_START_A, BREAKAWAY_MAX_A),
         BREAKAWAY_MAX_A);
     }
 
@@ -1262,7 +1315,7 @@ constexpr int COORDINATED_READY_SAMPLES = 5;            // 100 ms @ 200 Hz
       state.initialized = true;
     }
 
-    return breakaway_current;
+    return clamp(breakaway_current, -current_limit_a_, current_limit_a_);
   }
 
 
@@ -1441,6 +1494,7 @@ constexpr int COORDINATED_READY_SAMPLES = 5;            // 100 ms @ 200 Hz
 
 
   if (state.stall_count >= STALL_SAMPLES) {
+    pid_state = PidState{};
 
     state.tracking = false;
 
