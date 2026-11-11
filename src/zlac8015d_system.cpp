@@ -585,7 +585,7 @@ hardware_interface::return_type Zlac8015dSystemHardware::write(
   }
 
   // ==========================================================
-  // 200 Hz LADRC runtime CSV logger
+  // 200 Hz LADRC/PID runtime CSV logger
   //
   // Called from both normal LADRC operation and Quick Stop.
   // ==========================================================
@@ -599,9 +599,10 @@ hardware_interface::return_type Zlac8015dSystemHardware::write(
       static int csv_flush_count = 0;
 
       if (!csv_initialized) {
-        csv_log.open(
-          "/tmp/ladrc_track_200hz.csv",
-          std::ios::out | std::ios::trunc);
+        const char * log_path =
+          control_mode_ == ControlMode::PID_TORQUE ?
+            "/tmp/pid_track_200hz.csv" : "/tmp/ladrc_track_200hz.csv";
+        csv_log.open(log_path, std::ios::out | std::ios::trunc);
 
         if (csv_log.is_open()) {
           csv_log
@@ -614,8 +615,13 @@ hardware_interface::return_type Zlac8015dSystemHardware::write(
             << "z1_left,z1_right,"
             << "z2_left,z2_right,"
             << "tracking_left,tracking_right,"
-            << "breakaway_target_left_A,breakaway_target_right_A"
-            << '\n';
+            << "breakaway_target_left_A,breakaway_target_right_A";
+          if (control_mode_ == ControlMode::PID_TORQUE) {
+            csv_log
+              << ",pid_integral_left_A,pid_integral_right_A"
+              << ",pid_dvel_left_rad_s2,pid_dvel_right_rad_s2";
+          }
+          csv_log << '\n';
 
           csv_log << std::setprecision(10);
           csv_start_time = std::chrono::steady_clock::now();
@@ -649,8 +655,15 @@ hardware_interface::return_type Zlac8015dSystemHardware::write(
           << static_cast<int>(left_ladrc_.tracking) << ","
           << static_cast<int>(right_ladrc_.tracking) << ","
           << left_ladrc_.breakaway_target << ","
-          << right_ladrc_.breakaway_target
-          << '\n';
+          << right_ladrc_.breakaway_target;
+        if (control_mode_ == ControlMode::PID_TORQUE) {
+          csv_log
+            << "," << left_pid_.integral_current
+            << "," << right_pid_.integral_current
+            << "," << left_pid_.filtered_velocity_derivative
+            << "," << right_pid_.filtered_velocity_derivative;
+        }
+        csv_log << '\n';
 
         if (++csv_flush_count % 200 == 0) {
           csv_log.flush();
@@ -1124,11 +1137,12 @@ hardware_interface::return_type Zlac8015dSystemHardware::write(
   if (++debug_count % 200 == 0) {
     RCLCPP_INFO(
       rclcpp::get_logger("Zlac8015dSystemHardware"),
-      "LADRC ref[L,R]=[%.2f, %.2f] rad/s vel=[%.2f, %.2f] A_cmd=[%.2f, %.2f] A_actual=[%.2f, %.2f] z2=[%.2f, %.2f]",
+      "%s ref[L,R]=[%.2f, %.2f] rad/s vel=[%.2f, %.2f] A_cmd=[%.2f, %.2f] A_actual=[%.2f, %.2f] z2=[%.2f, %.2f]",
+      control_mode_ == ControlMode::PID_TORQUE ? "PID" : "LADRC",
       hw_commands_[0], hw_commands_[1],
       hw_velocities_[0], hw_velocities_[1],
       cmd_current_l, cmd_current_r,
-      current_l_measured, current_r_measured,
+      hw_efforts_[0], hw_efforts_[1],
       left_ladrc_.z2, right_ladrc_.z2);
   }
 
@@ -1758,9 +1772,9 @@ void Zlac8015dSystemHardware::send_zero_command()
   struct can_frame frame {};
 
   frame.can_id =
-    control_mode_ == ControlMode::LADRC_TORQUE
-      ? 0x200u + node_id_
-      : 0x300u + node_id_;
+    control_mode_ == ControlMode::VELOCITY
+      ? 0x300u + node_id_
+      : 0x200u + node_id_;
 
   frame.can_dlc = 4;
   std::memcpy(frame.data, &zero, sizeof(zero));
