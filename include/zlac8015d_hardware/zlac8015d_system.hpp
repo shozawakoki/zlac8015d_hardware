@@ -64,10 +64,20 @@ private:
     int direction_sign{0};
   };
 
+  // Integral and derivative states used only in PID current mode.
+  struct PidState
+  {
+    double integral_current{0.0}; // integral output [A]
+    double filtered_velocity_derivative{0.0}; // [rad/s^2]
+    double previous_velocity{0.0}; // [rad/s]
+    bool initialized{false};
+  };
+
   enum class ControlMode
   {
     VELOCITY,
-    LADRC_TORQUE
+    LADRC_TORQUE,
+    PID_TORQUE
   };
 
   // CAN socket / CANopen configuration
@@ -82,8 +92,9 @@ private:
   void send_zero_command();
 
   // LADRC helper
-  double compute_ladrc_current(
+  double compute_current_command(
     LadrcState & state,
+    PidState & pid_state,
     double velocity_reference,
     double velocity_measured,
     double current_measured,
@@ -101,6 +112,13 @@ private:
   ControlMode control_mode_{ControlMode::VELOCITY};
   LadrcState left_ladrc_;
   LadrcState right_ladrc_;
+  PidState left_pid_;
+  PidState right_pid_;
+  double pid_kp_{0.7};  // [A/(rad/s)]
+  double pid_ki_{0.5};  // [A/rad]
+  double pid_kd_{0.03}; // [A*s/rad]
+  double pid_derivative_filter_tau_s_{0.05}; // [s]
+  int sync_track_count_{0};
   double controller_bandwidth_{5.0};       // wc [rad/s]
   double observer_bandwidth_{20.0};        // wo [rad/s]
   double current_limit_a_{2.0};            // absolute LADRC output limit [A]
