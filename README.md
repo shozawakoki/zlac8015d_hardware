@@ -2,14 +2,15 @@
 
 ZLAC8015D モータドライバを、Linux SocketCAN / CANopen 経由で ROS 2 の `ros2_control` から操作するための **C++ ハードウェアインターフェース**です。対向二輪型移動ロボットの左右駆動輪に対して、速度指令とエンコーダ位置・実測角速度・モータ電流の取得を行います。
 
-2種類の制御モードを実装しています。
+**3種類の制御モード**を実装しています。`devel/pid` ブランチでは、既存のLADRCとモータドライバ内蔵速度制御を維持し、左右車輪の独立したPID電流制御を追加しています。
 
 | モード | 内容 | ドライバへの指令 |
 | --- | --- | --- |
 | `velocity` | ZLAC8015D 内蔵の速度制御を使用 | 車輪角速度 |
 | `ladrc_torque` | 左右車輪の一次 LADRC（線形拡張状態オブザーバ：LESO）で速度追従制御 | モータ電流 |
+| `pid_torque` | 左右車輪の PID による速度追従制御（電流指令） | モータ電流 |
 
-ROS 2 側の**コマンドインターフェースは、両モードとも車輪角速度 `velocity` [rad/s]** です。`ladrc_torque` モードのみ、プラグイン内部で電流指令に変換します。
+ROS 2 側の**コマンドインターフェースは、3モードとも車輪角速度 `velocity` [rad/s]** です。`ladrc_torque` と `pid_torque` では、プラグイン内部で電流指令に変換します。`velocity` はドライバの内蔵速度制御を使用します。
 
 この README は `main` の `src/zlac8015d_system.cpp`、ヘッダー、ビルド設定および [`zlac8015d_can_bringup`](https://github.com/shozawakoki/zlac8015d_can_bringup) の現行 URDF を基準にしています。**本実装に含まれない同定用プログラムやスクリプトの実行手順は掲載していません。**
 
@@ -99,6 +100,74 @@ ros2 topic echo /odom
 
 最初の試験では車輪を浮かせ、非常停止手段を確保してください。`ros2_control` と同じ CANopen ノードを操作する別プログラムを同時に起動しないでください。
 
+## 制御モードの切替（devel/pid）
+
+最初に本リポジトリの `devel/pid` ブランチをビルドしてください。bringup 側は既存の `main` をそのまま使用できます。
+
+```bash
+source /opt/ros/humble/setup.bash
+cd ~/ros2_ws/src/zlac8015d_hardware
+git fetch origin
+git switch devel/pid
+cd ~/ros2_ws
+colcon build --packages-select zlac8015d_hardware zlac_can_bringup --symlink-install
+source install/setup.bash
+```
+
+### 起動時の切替（推奨）
+
+モードを環境変数 `ZLAC_CONTROL_MODE` で指定します。これは URDF の `control_mode` を一時的に上書きします。新しいターミナルで、次のうち **1つだけ** を実行してください。
+
+```bash
+# PID 電流制御（Kp=0.7, Ki=0.5, Kd=0.03）
+ZLAC_CONTROL_MODE=pid_torque ros2 launch zlac_can_bringup zlac_can_bringup.launch.py
+
+# 従来の LADRC 電流制御
+ZLAC_CONTROL_MODE=ladrc_torque ros2 launch zlac_can_bringup zlac_can_bringup.launch.py
+
+# モータドライバ内蔵の速度制御
+ZLAC_CONTROL_MODE=velocity ros2 launch zlac_can_bringup zlac_can_bringup.launch.py
+```
+
+`ZLAC_CONTROL_MODE` を省略すると、bringup の URDF に設定されている `control_mode` を使用します（現行 bringup では `ladrc_torque`）。モード変更は**起動・再起動時のみ**で、運転中の切替には対応しません。必ず既存の launch を停止してから別モードで再起動してください。
+
+### URDF を書き換えて切替
+
+`zlac8015d_can_bringup/urdf/orange_go_2025.urdf` 内で次のように設定することもできます。
+
+```xml
+<param name="control_mode">pid_torque</param>
+<param name="pid_kp">0.7</param>
+<param name="pid_ki">0.5</param>
+<param name="pid_kd">0.03</param>
+<param name="pid_derivative_filter_tau_s">0.05</param>
+```
+
+`pid_kp`、`pid_ki`、`pid_kd`、`pid_derivative_filter_tau_s` は **ハードウェア側に上記の既定値があります**。URDF に記載しなくてもこの値が適用されます。URDF を変更した場合は bringup を再ビルドしてから再起動してください。環境変数が設定されている場合は環境変数のモードが優先されます。
+
+### PID の制御則
+
+各輪の目標角速度を `r`、実測角速度を `omega` とすると、速度偏差は `e = r - omega` です。TRACK 状態のPID制御は以下を用います。
+
+```text
+I_cmd = Kp * e + integral(Ki * e dt) - Kd * Df(omega)
+```
+
+`Df(omega)` は実測角速度の時間微分を時定数 `0.05 s` の一次ローパスで平滑化したものです。目標値の急変で微分キックが生じるのを避けるため、微分項は偏差ではなく実測値から計算します。
+
+| PID パラメータ | 初期値 | 意味 |
+| --- | ---: | --- |
+| `pid_kp` | `0.7` | 比例ゲイン [A/(rad/s)] |
+| `pid_ki` | `0.5` | 積分ゲイン [A/rad] |
+| `pid_kd` | `0.03` | 微分ゲイン [A·s/rad] |
+| `pid_derivative_filter_tau_s` | `0.05` | 微分の一次フィルタ時定数 [s] |
+
+これらは指定された**初期ゲイン**であり、実機での安定性・追従性能を確認して調整する必要があります。制御出力はモータ電流 [A] であり、数値をそのままドライバ内蔵 PID のゲインとして使用するものではありません。
+
+PID と LADRC は既存の BREAKAWAY、TRACK_HOLD、失速検知、その場旋回時の協調始動、直進同期補正、通常停止の減速ランプを共用します。PID の積分状態は起動時、方向切替時、停止時、BREAKAWAY／失速復帰時に初期化されます。電流出力は既存の `current_limit_a` と TRACK 時の変化率制限を経由します。PID の積分には電流上限に対する条件付き積分（アンチワインドアップ）を適用します。
+
+**比較実験上の注意：** 本実装の比較には共通の補助制御が含まれます。また、PIDの通常減速ランプには公称入力ゲイン `b0` を使ったフィードフォワードも含みます。制御則そのものの比較には TRACK 中の区間を主評価とし、起動・停止区間は別に評価してください。
+
 ## ROS 2 とドライバのインターフェース
 
 | ジョイント | コマンド | 状態 |
@@ -135,9 +204,11 @@ ros2 topic echo /odom
 | `current_rate_limit_a_per_s` | `20.0` | TRACK 電流の変化率上限 [A/s] |
 | `feedback_timeout_ms` | `30.0` | 速度受信のタイムアウト閾値 [ms] |
 
-`b0` は機体・運転条件に合わせた同定結果を適用してください。`18.0` は現在の URDF に記載された公称値です。**静止摩擦対策に用いる BREAKAWAY 電流ランプは C++ ソースに定数として定義されています。** また、一部の後段処理では電流変化率制限より優先して電流を変更するため、すべてのフェーズで設定された `current_rate_limit_a_per_s` が適用されるわけではありません。
+`b0` は機体・運転条件に合わせた同定結果を適用してください。PIDモードでも通常停止フィードフォワードに使用します。`18.0` は現在の URDF に記載された公称値です。**静止摩擦対策に用いる BREAKAWAY 電流ランプは C++ ソースに定数として定義されています。** また、一部の後段処理では電流変化率制限より優先して電流を変更するため、すべてのフェーズで設定された `current_rate_limit_a_per_s` が適用されるわけではありません。
 
 ## LADRC による電流指令
+
+この章は `ladrc_torque` モードの説明です。`pid_torque` では LESO を動かさず、前述の PID によって TRACK 中の電流指令を計算します。
 
 各車輪の制御対象を、運転中の近似として
 
@@ -165,7 +236,7 @@ I_raw = (wc * (omega_reference - z1) + a_ff - z2) / b0
 
 停止状態から電流を増やして回転開始を確認し、その後に通常の LADRC に切り替えます。
 
-- BREAKAWAY：`0.65 A` から開始し、内部の制御カウントが進むと `0.50 A` ずつ増加。実装上の上限 `8.0 A`。
+- BREAKAWAY：`0.65 A` から開始し、内部の制御カウントが進むと `0.50 A` ずつ増加。実装上の上限は `min(8.0 A, current_limit_a)`（最終指令でも電流上限を適用）。
 - 単輪の TRACK 移行条件：指令方向の実測角速度が `0.30 rad/s` 以上の状態で `20` 制御サンプル継続。
 - TRACK_HOLD：移行直後 `30` サンプルを用いて起動電流から通常の電流下限 `0.20 A` へ移行。
 - STALL 検出：指令方向の角速度が `0.10 rad/s` 未満の状態で `20` サンプル継続すると BREAKAWAY に戻ります。
@@ -176,7 +247,7 @@ I_raw = (wc * (omega_reference - z1) + a_ff - z2) / b0
 
 ### 通常停止
 
-`ladrc_torque` モードで左右の目標車輪角速度がゼロになると、`write()` 内部で**急停止ではなく通常減速ランプ**を開始します。
+`ladrc_torque` / `pid_torque` モードで左右の目標車輪角速度がゼロになると、`write()` 内部で**急停止ではなく通常減速ランプ**を開始します。
 
 - 車体並進減速度の設定値：`1.0 m/s²`（ソース内定数）。
 - 車輪半径 `0.064 m` に対応する車輪角減速度：`15.625 rad/s²`。
@@ -195,7 +266,7 @@ CANopen ノード ID が `1` の場合：
 | `0x281` | ZLAC8015D → PC | 左右実測電流（各 `int16`、0.1 A 単位） |
 | `0x381` | ZLAC8015D → PC | 左右エンコーダ位置（各 `int32`、count） |
 | `0x301` | PC → ZLAC8015D | 目標速度（`velocity` モード） |
-| `0x201` | PC → ZLAC8015D | 左右目標電流（`ladrc_torque`、各 `int16`、mA 単位） |
+| `0x201` | PC → ZLAC8015D | 左右目標電流（`ladrc_torque` / `pid_torque`、各 `int16`、mA 単位） |
 | `0x601` | PC → ZLAC8015D | SDO 設定コマンド |
 
 起動時に NMT / SDO を使って PDO マッピング、動作モード（Profile Velocity = `3` または Profile Torque = `4`）、CiA402 の初期設定を送信します。
@@ -204,27 +275,29 @@ CANopen ノード ID が `1` の場合：
 
 ## フィードバック監視とログ
 
-`ladrc_torque` では、未受信の速度フィードバックがある場合はゼロ電流指令を試みます。最終受信から `feedback_timeout_ms` を超えると、ゼロ電流指令の送信を試みて `ros2_control` にエラーを返します。**CAN 断線時はゼロ電流フレーム自体が届かない可能性があるため、安全停止を保証するものではありません。** `velocity` モードには、この LADRC 固有のフィードバック監視は適用されません。
+`ladrc_torque` / `pid_torque` では、未受信の速度フィードバックがある場合はゼロ電流指令を試みます。最終受信から `feedback_timeout_ms` を超えると、ゼロ電流指令の送信を試みて `ros2_control` にエラーを返します。**CAN 断線時はゼロ電流フレーム自体が届かない可能性があるため、安全停止を保証するものではありません。** `velocity` モードには、この電流制御モードのフィードバック監視は適用されません。
 
-LADRC 実行ログの出力先：
+制御モード別の実行ログ出力先：
 
 ```text
-/tmp/ladrc_track_200hz.csv
+/tmp/ladrc_track_200hz.csv  # LADRC モード
+/tmp/pid_track_200hz.csv    # PID モード
 ```
 
-CSV は実装上、目標・実測角速度、位置、指令電流・実測電流、LESO 推定 `z1` / `z2`、TRACK フラグ、BREAKAWAY 目標電流を収録します。通常は `200` サンプルごとにフラッシュされます。`velocity` モードではこの CSV は生成しません。ログファイル名の `200hz` は公称制御レートに基づきます。
+CSV は実装上、目標・実測角速度、位置、指令電流・実測電流、`z1` / `z2` 診断列、TRACK フラグ、BREAKAWAY 目標電流を収録します。LADRC モードの `z1` / `z2` は LESO 推定値ですが、PID モードでは `z1` は実測角速度、`z2` は 0 で、LESO 推定を意味しません。PIDログには積分電流成分とフィルタ後の角加速度も追加しています。通常は `200` サンプルごとにフラッシュされます。`velocity` モードではいずれの CSV も生成しません。ログファイル名の `200hz` は公称制御レートに基づきます。
 
 ログ確認：
 
 ```bash
-head -n 5 /tmp/ladrc_track_200hz.csv
-tail -n 5 /tmp/ladrc_track_200hz.csv
+# 選択した制御モードに応じたファイルを確認
+head -n 5 /tmp/pid_track_200hz.csv
+tail -n 5 /tmp/pid_track_200hz.csv
 ```
 
 ## 安全上の注意
 
 - **モータを動かす前に非常停止手段を確保**し、初回は車輪を浮かせて回転方向・停止挙動を確認してください。
-- `current_limit_a` は主として TRACK の電流指令を制限します。BREAKAWAY 電流や内部の特別な処理を含めた包括的な安全制限ではありません。ソフトウェア側とドライバ側の許容電流を必ず確認してください。
+- `current_limit_a` は TRACK と BREAKAWAY の最終電流指令に適用します。すべての状態遷移で電流変化率が一律に守られるわけではありません。ドライバ側の電流制限・許容値も必ず確認してください。
 - CANopen ノード、モータ配線、符号、エンコーダ分解能が異なる環境では、実装を検証してから使用してください。
 - 同定用などの独立した CAN 操作プログラムと bringup を同時実行しないでください。
 - CAN 断線、ドライバ故障、PC 停止時の安全はこのソフトウェアだけでは保証できません。非常停止回路、ドライバの保護機能を別途用意してください。
