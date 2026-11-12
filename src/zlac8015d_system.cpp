@@ -1035,7 +1035,7 @@ hardware_interface::return_type Zlac8015dSystemHardware::write(
 
   // 0.30 rad/s for 100 ms = 20 samples @ 200 Hz.
   constexpr int COORDINATED_START_SAMPLES = 5;
-  constexpr double COORDINATED_BREAKAWAY_START_A = 0.65;
+  const double COORDINATED_BREAKAWAY_START_A = breakaway_start_a_;
 
   // ----------------------------------------------------------
   // BREAKAWAY -> TRACK:
@@ -1211,7 +1211,7 @@ double Zlac8015dSystemHardware::compute_current_command(
   // During coordinated in-place BREAKAWAY, a wheel that has
   // already satisfied the start condition waits at this current
   // while the other wheel continues its BREAKAWAY ramp.
-  constexpr double READY_WAIT_A = 3.00;
+  const double READY_WAIT_A = BREAKAWAY_MAX_A;
 
   const int BREAKAWAY_STEP_SAMPLES = breakaway_step_samples_;
 
