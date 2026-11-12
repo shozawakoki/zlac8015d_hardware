@@ -148,6 +148,11 @@ hardware_interface::CallbackReturn Zlac8015dSystemHardware::on_init(
       get_double_parameter(info_, "pid_transition_duration_s", 0.10);
     RCLCPP_INFO(
       rclcpp::get_logger("Zlac8015dSystemHardware"),
+      "PI three-stage transition: %s (duration %.3f s, cutoff 80%% ref)",
+      pid_three_stage_transition_ ? "enabled" : "disabled",
+      pid_transition_duration_s_);
+    RCLCPP_INFO(
+      rclcpp::get_logger("Zlac8015dSystemHardware"),
       "PI bumpless handoff: %s", pid_bumpless_handoff_ ? "enabled" : "disabled");
 
     left_ladrc_.b0 = get_double_parameter(info_, "ladrc_b0_left", 1.0);
