@@ -1303,6 +1303,8 @@ double Zlac8015dSystemHardware::compute_current_command(
     state.track_hold_start = TRACK_FLOOR_A;
 
     state.direction_sign = 0;
+    state.pi_transitioning = false;
+    state.pi_transition_elapsed_s = 0.0;
     pid_state = PidState{};
 
     return 0.0;
@@ -1343,6 +1345,8 @@ double Zlac8015dSystemHardware::compute_current_command(
 
     state.track_hold_count = 0;
     state.track_hold_start = TRACK_FLOOR_A;
+    state.pi_transitioning = false;
+    state.pi_transition_elapsed_s = 0.0;
     pid_state = PidState{};
   }
 
@@ -1420,6 +1424,14 @@ double Zlac8015dSystemHardware::compute_current_command(
 
       state.tracking = true;
       state.stall_count = 0;
+      if (control_mode_ == ControlMode::PID_TORQUE &&
+          pid_three_stage_transition_ && !normal_stop_ramp_active_) {
+        state.pi_transitioning = true;
+        state.pi_transition_elapsed_s = 0.0;
+        state.pi_transition_start_current_a = state.last_current_cmd;
+        state.pi_transition_start_speed_rad_s =
+          speed_in_command_direction;
+      }
 
       state.track_hold_count = 0;
       // The existing slew limiter keeps current continuous on handoff.
@@ -1523,7 +1535,8 @@ double Zlac8015dSystemHardware::compute_current_command(
       // Optional bumpless transfer: initialize the PI integral output so
       // that the first TRACK request matches the final BREAKAWAY command.
       // Disabled by default to preserve established behavior.
-      if (pid_bumpless_handoff_ && !normal_stop_ramp_active_) {
+      if (pid_bumpless_handoff_ && !pid_three_stage_transition_ &&
+          !normal_stop_ramp_active_) {
         const double error_at_handoff =
           velocity_reference - velocity_measured;
         const double p_at_handoff = pid_kp_ * error_at_handoff;
@@ -1669,6 +1682,7 @@ double Zlac8015dSystemHardware::compute_current_command(
     std::max(stall_min_drive_current_a_, breakaway_start_a_);
   const bool genuinely_stalled =
     !normal_stop_ramp_active_ &&
+    !state.pi_transitioning &&
     state.track_hold_count >= TRACK_HOLD_SAMPLES &&
     speed_in_command_direction >= -STALL_SPEED_RAD_S &&
     speed_in_command_direction < STALL_SPEED_RAD_S &&
@@ -1697,6 +1711,8 @@ double Zlac8015dSystemHardware::compute_current_command(
     pid_state = PidState{};
 
     state.tracking = false;
+    state.pi_transitioning = false;
+    state.pi_transition_elapsed_s = 0.0;
 
     state.start_count = 0;
     state.stall_count = 0;
