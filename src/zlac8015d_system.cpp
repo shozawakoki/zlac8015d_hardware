@@ -1587,6 +1587,47 @@ double Zlac8015dSystemHardware::compute_current_command(
 
   double current_command = raw_current_request;
 
+  // Third stage for PI only: transient feedforward separate from the
+  // integral state. Fade with elapsed time and measured wheel speed.
+  // Remove assist no later than 80% of the commanded speed; never
+  // inject assist while braking or executing a normal stop.
+  if (state.pi_transitioning) {
+    if (control_mode_ != ControlMode::PID_TORQUE ||
+        normal_stop_ramp_active_ ||
+        static_cast<double>(direction) * raw_current_request <= 0.0) {
+      state.pi_transitioning = false;
+    } else {
+      state.pi_transition_elapsed_s += dt;
+      const double cutoff_speed = 0.8 * std::abs(velocity_reference);
+      const double speed_headroom =
+        cutoff_speed - state.pi_transition_start_speed_rad_s;
+      const double remaining_speed =
+        cutoff_speed - speed_in_command_direction;
+      if (state.pi_transition_elapsed_s >= pid_transition_duration_s_ ||
+          remaining_speed <= 0.0 || speed_headroom <= 1.0e-6) {
+        state.pi_transitioning = false;
+      } else {
+        const double time_weight = clamp(
+          1.0 - state.pi_transition_elapsed_s / pid_transition_duration_s_,
+          0.0, 1.0);
+        const double speed_weight = clamp(
+          remaining_speed / speed_headroom, 0.0, 1.0);
+        const double pi_drive =
+          static_cast<double>(direction) * raw_current_request;
+        const double handoff_drive = std::max(
+          0.0, static_cast<double>(direction) *
+            state.pi_transition_start_current_a);
+        // Bounded interpolation never exceeds the larger original
+        // command and never adds drive beyond the BREAKAWAY level.
+        const double assisted_drive = pi_drive +
+          time_weight * speed_weight *
+          std::max(0.0, handoff_drive - pi_drive);
+        current_command = static_cast<double>(direction) *
+          assisted_drive;
+      }
+    }
+  }
+
 
   // TRACK Imax
   current_command = clamp(
