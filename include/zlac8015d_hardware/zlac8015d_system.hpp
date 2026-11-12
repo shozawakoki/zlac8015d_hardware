@@ -120,6 +120,7 @@ private:
   double pid_kp_{0.7};  // [A/(rad/s)]
   double pid_ki_{0.5};  // [A/rad]
   double pid_kd_{0.03}; // [A*s/rad]
+  bool pid_bumpless_handoff_{false}; // opt-in PI integral tracking on TRACK entry
   double pid_derivative_filter_tau_s_{0.05}; // [s]
   // Tunable start/recovery thresholds. Interpret step_samples against the
   // ros2_control update rate (nominally 200 Hz); no changes while running.
