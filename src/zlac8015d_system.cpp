@@ -149,6 +149,26 @@ hardware_interface::CallbackReturn Zlac8015dSystemHardware::on_init(
       get_double_parameter(info_, "current_rate_limit_a_per_s", 20.0);
     feedback_timeout_s_ =
       get_double_parameter(info_, "feedback_timeout_ms", 30.0) / 1000.0;
+
+    // Start/recovery parameters are distinct from PID/LADRC gains.
+    breakaway_start_a_ =
+      get_double_parameter(info_, "breakaway_start_a", 0.65);
+    breakaway_step_a_ =
+      get_double_parameter(info_, "breakaway_step_a", 0.10);
+    breakaway_max_a_ =
+      get_double_parameter(info_, "breakaway_max_a", 2.0);
+    breakaway_step_samples_ =
+      get_int_parameter(info_, "breakaway_step_samples", 20);
+    breakaway_start_speed_rad_s_ =
+      get_double_parameter(info_, "breakaway_start_speed_rad_s", 0.30);
+    breakaway_start_samples_ =
+      get_int_parameter(info_, "breakaway_start_samples", 6);
+    stall_speed_rad_s_ =
+      get_double_parameter(info_, "stall_speed_rad_s", 0.10);
+    stall_samples_ =
+      get_int_parameter(info_, "stall_samples", 80);
+    stall_min_drive_current_a_ =
+      get_double_parameter(info_, "stall_min_drive_current_a", 0.20);
   } catch (const std::exception & e) {
     RCLCPP_ERROR(
       rclcpp::get_logger("Zlac8015dSystemHardware"),
@@ -164,6 +184,29 @@ hardware_interface::CallbackReturn Zlac8015dSystemHardware::on_init(
     RCLCPP_ERROR(
       rclcpp::get_logger("Zlac8015dSystemHardware"),
       "LADRC/current/watchdog parameters must be positive.");
+    return hardware_interface::CallbackReturn::ERROR;
+  }
+
+  if (!std::isfinite(breakaway_start_a_) ||
+      !std::isfinite(breakaway_step_a_) ||
+      !std::isfinite(breakaway_max_a_) ||
+      !std::isfinite(breakaway_start_speed_rad_s_) ||
+      !std::isfinite(stall_speed_rad_s_) ||
+      !std::isfinite(stall_min_drive_current_a_) ||
+      breakaway_start_a_ <= 0.0 ||
+      breakaway_step_a_ <= 0.0 ||
+      breakaway_max_a_ < breakaway_start_a_ ||
+      breakaway_max_a_ > current_limit_a_ ||
+      breakaway_step_samples_ < 1 || breakaway_step_samples_ > 2000 ||
+      breakaway_start_speed_rad_s_ <= 0.0 ||
+      breakaway_start_samples_ < 1 || breakaway_start_samples_ > 500 ||
+      stall_speed_rad_s_ <= 0.0 ||
+      stall_samples_ < 1 || stall_samples_ > 5000 ||
+      stall_min_drive_current_a_ <= 0.0 ||
+      stall_min_drive_current_a_ > current_limit_a_)
+  {
+    RCLCPP_ERROR(rclcpp::get_logger("Zlac8015dSystemHardware"),
+      "Invalid BREAKAWAY or stall-recovery thresholds.");
     return hardware_interface::CallbackReturn::ERROR;
   }
 
@@ -265,7 +308,7 @@ hardware_interface::CallbackReturn Zlac8015dSystemHardware::on_activate(
   left_ladrc_.start_count = 0;
   left_ladrc_.stall_count = 0;
   left_ladrc_.breakaway_count = 0;
-  left_ladrc_.breakaway_target = 0.65;
+  left_ladrc_.breakaway_target = breakaway_start_a_;
   left_ladrc_.track_hold_count = 0;
   left_ladrc_.track_hold_start = 0.20;
   left_ladrc_.direction_sign = 0;
@@ -278,7 +321,7 @@ hardware_interface::CallbackReturn Zlac8015dSystemHardware::on_activate(
   right_ladrc_.start_count = 0;
   right_ladrc_.stall_count = 0;
   right_ladrc_.breakaway_count = 0;
-  right_ladrc_.breakaway_target = 0.65;
+  right_ladrc_.breakaway_target = breakaway_start_a_;
   right_ladrc_.track_hold_count = 0;
   right_ladrc_.track_hold_start = 0.20;
   right_ladrc_.direction_sign = 0;
@@ -1161,23 +1204,23 @@ double Zlac8015dSystemHardware::compute_current_command(
 
   constexpr double REF_ZERO = 1.0e-6;
 
-  constexpr double BREAKAWAY_START_A = 0.65;
-  constexpr double BREAKAWAY_STEP_A = 0.50;
-  const double BREAKAWAY_MAX_A = std::min(8.00, current_limit_a_);
+  const double BREAKAWAY_START_A = breakaway_start_a_;
+  const double BREAKAWAY_STEP_A = breakaway_step_a_;
+  const double BREAKAWAY_MAX_A = std::min(breakaway_max_a_, current_limit_a_);
 
   // During coordinated in-place BREAKAWAY, a wheel that has
   // already satisfied the start condition waits at this current
   // while the other wheel continues its BREAKAWAY ramp.
   constexpr double READY_WAIT_A = 3.00;
 
-  constexpr int BREAKAWAY_STEP_SAMPLES = 10;  // 200 ms @ 200 Hz
+  const int BREAKAWAY_STEP_SAMPLES = breakaway_step_samples_;
 
-  constexpr double START_SPEED_RAD_S = 0.30;
-  constexpr int START_SAMPLES = 20;
-constexpr int COORDINATED_READY_SAMPLES = 5;            // 100 ms @ 200 Hz
+  const double START_SPEED_RAD_S = breakaway_start_speed_rad_s_;
+  const int START_SAMPLES = breakaway_start_samples_;
+  const int COORDINATED_READY_SAMPLES = breakaway_start_samples_;
 
-  constexpr double STALL_SPEED_RAD_S = 0.10;
-  constexpr int STALL_SAMPLES = 20;            // 100 ms @ 200 Hz
+  const double STALL_SPEED_RAD_S = stall_speed_rad_s_;
+  const int STALL_SAMPLES = stall_samples_;
 
   constexpr int TRACK_HOLD_SAMPLES = 30;       // 300 ms @ 200 Hz
   constexpr double TRACK_FLOOR_A = 0.20;
@@ -1293,6 +1336,7 @@ constexpr int COORDINATED_READY_SAMPLES = 5;            // 100 ms @ 200 Hz
     // Increase target every BREAKAWAY_STEP_SAMPLES cycles only while
     // this wheel is not yet ready.
     if (!coordinated_ready &&
+        speed_in_command_direction < START_SPEED_RAD_S &&
         state.breakaway_count > 0 &&
         state.breakaway_count % BREAKAWAY_STEP_SAMPLES == 0)
     {
@@ -1550,7 +1594,19 @@ constexpr int COORDINATED_READY_SAMPLES = 5;            // 100 ms @ 200 Hz
   // Stall detection
   // ==========================================================
 
-  if (speed_in_command_direction < STALL_SPEED_RAD_S) {
+  // Restart only after sustained low speed while the controller asks
+  // for positive drive torque. A braking command after overshoot must NOT
+  // be interpreted as a static-friction stall.
+  const double driving_request =
+    static_cast<double>(direction) * raw_current_request;
+  const bool genuinely_stalled =
+    !normal_stop_ramp_active_ &&
+    speed_in_command_direction >= -STALL_SPEED_RAD_S &&
+    speed_in_command_direction < STALL_SPEED_RAD_S &&
+    driving_request >= stall_min_drive_current_a_ &&
+    static_cast<double>(direction) * current_command >=
+      stall_min_drive_current_a_;
+  if (genuinely_stalled) {
     ++state.stall_count;
   } else {
     state.stall_count = 0;
