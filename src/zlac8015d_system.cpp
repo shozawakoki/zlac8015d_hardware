@@ -307,6 +307,8 @@ hardware_interface::CallbackReturn Zlac8015dSystemHardware::on_activate(
   left_ladrc_.tracking = false;
   left_ladrc_.start_count = 0;
   left_ladrc_.stall_count = 0;
+  left_ladrc_.stall_recovery_attempts = 0;
+  left_ladrc_.stall_lockout = false;
   left_ladrc_.breakaway_count = 0;
   left_ladrc_.breakaway_target = breakaway_start_a_;
   left_ladrc_.track_hold_count = 0;
@@ -320,6 +322,8 @@ hardware_interface::CallbackReturn Zlac8015dSystemHardware::on_activate(
   right_ladrc_.tracking = false;
   right_ladrc_.start_count = 0;
   right_ladrc_.stall_count = 0;
+  right_ladrc_.stall_recovery_attempts = 0;
+  right_ladrc_.stall_lockout = false;
   right_ladrc_.breakaway_count = 0;
   right_ladrc_.breakaway_target = breakaway_start_a_;
   right_ladrc_.track_hold_count = 0;
@@ -658,7 +662,8 @@ hardware_interface::return_type Zlac8015dSystemHardware::write(
             << "z1_left,z1_right,"
             << "z2_left,z2_right,"
             << "tracking_left,tracking_right,"
-            << "breakaway_target_left_A,breakaway_target_right_A";
+            << "breakaway_target_left_A,breakaway_target_right_A,"
+            << "stall_lockout_left,stall_lockout_right";
           if (control_mode_ == ControlMode::PID_TORQUE) {
             csv_log
               << ",pid_integral_left_A,pid_integral_right_A"
@@ -698,7 +703,9 @@ hardware_interface::return_type Zlac8015dSystemHardware::write(
           << static_cast<int>(left_ladrc_.tracking) << ","
           << static_cast<int>(right_ladrc_.tracking) << ","
           << left_ladrc_.breakaway_target << ","
-          << right_ladrc_.breakaway_target;
+          << right_ladrc_.breakaway_target << ","
+          << static_cast<int>(left_ladrc_.stall_lockout) << ","
+          << static_cast<int>(right_ladrc_.stall_lockout);
         if (control_mode_ == ControlMode::PID_TORQUE) {
           csv_log
             << "," << left_pid_.integral_current
@@ -1148,6 +1155,13 @@ hardware_interface::return_type Zlac8015dSystemHardware::write(
       COORDINATED_BREAKAWAY_START_A;
   }
 
+  // A repeated stall on either wheel latches both current commands to zero.
+  // This software lockout is not a physical emergency stop.
+  if (left_ladrc_.stall_lockout || right_ladrc_.stall_lockout) {
+    cmd_current_l = 0.0;
+    cmd_current_r = 0.0;
+  }
+
   // Final absolute current cap applies to every start/track/turn state.
   cmd_current_l = clamp(cmd_current_l, -current_limit_a_, current_limit_a_);
   cmd_current_r = clamp(cmd_current_r, -current_limit_a_, current_limit_a_);
@@ -1222,7 +1236,7 @@ double Zlac8015dSystemHardware::compute_current_command(
   const double STALL_SPEED_RAD_S = stall_speed_rad_s_;
   const int STALL_SAMPLES = stall_samples_;
 
-  constexpr int TRACK_HOLD_SAMPLES = 30;       // 300 ms @ 200 Hz
+  constexpr int TRACK_HOLD_SAMPLES = 30;       // 150 ms @ 200 Hz
   constexpr double TRACK_FLOOR_A = 0.20;
 
 
@@ -1242,6 +1256,8 @@ double Zlac8015dSystemHardware::compute_current_command(
     state.tracking = false;
     state.start_count = 0;
     state.stall_count = 0;
+    state.stall_recovery_attempts = 0;
+    state.stall_lockout = false;
 
     state.breakaway_count = 0;
     state.breakaway_target = BREAKAWAY_START_A;
