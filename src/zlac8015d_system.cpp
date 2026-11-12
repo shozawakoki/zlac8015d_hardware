@@ -138,7 +138,8 @@ hardware_interface::CallbackReturn Zlac8015dSystemHardware::on_init(
     pid_ki_ = get_double_parameter(info_, "pid_ki", 0.5);
     pid_kd_ = get_double_parameter(info_, "pid_kd", 0.03);
     pid_bumpless_handoff_ =
-      get_string_parameter(info_, "pid_bumpless_handoff", "false") == "true";
+      (get_string_parameter(info_, "pid_bumpless_handoff", "false") == "true" ||
+       get_string_parameter(info_, "pid_bumpless_handoff", "false") == "1");
     pid_derivative_filter_tau_s_ =
       get_double_parameter(info_, "pid_derivative_filter_tau_s", 0.05);
 
