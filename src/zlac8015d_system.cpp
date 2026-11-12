@@ -1100,7 +1100,7 @@ hardware_interface::return_type Zlac8015dSystemHardware::write(
       (left_ladrc_.tracking != right_ladrc_.tracking))
   {
     auto reset_to_breakaway =
-      [](LadrcState & state,
+      [COORDINATED_BREAKAWAY_START_A](LadrcState & state,
          const double velocity_measured,
          const int direction)
       {
