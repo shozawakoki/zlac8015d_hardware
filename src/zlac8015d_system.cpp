@@ -137,6 +137,8 @@ hardware_interface::CallbackReturn Zlac8015dSystemHardware::on_init(
     pid_kp_ = get_double_parameter(info_, "pid_kp", 0.7);
     pid_ki_ = get_double_parameter(info_, "pid_ki", 0.5);
     pid_kd_ = get_double_parameter(info_, "pid_kd", 0.03);
+    pid_bumpless_handoff_ =
+      get_string_parameter(info_, "pid_bumpless_handoff", "false") == "true";
     pid_derivative_filter_tau_s_ =
       get_double_parameter(info_, "pid_derivative_filter_tau_s", 0.05);
 
@@ -1483,7 +1485,20 @@ double Zlac8015dSystemHardware::compute_current_command(
     if (!pid_state.initialized) {
       pid_state.previous_velocity = velocity_measured;
       pid_state.filtered_velocity_derivative = 0.0;
-      pid_state.integral_current = 0.0;
+      // Optional bumpless transfer: initialize the PI integral output so
+      // that the first TRACK request matches the final BREAKAWAY command.
+      // Disabled by default to preserve established behavior.
+      if (pid_bumpless_handoff_ && !normal_stop_ramp_active_) {
+        const double error_at_handoff =
+          velocity_reference - velocity_measured;
+        const double p_at_handoff = pid_kp_ * error_at_handoff;
+        // The derivative state is initialized to zero above.
+        pid_state.integral_current = clamp(
+          state.last_current_cmd - p_at_handoff,
+          -current_limit_a_, current_limit_a_);
+      } else {
+        pid_state.integral_current = 0.0;
+      }
       pid_state.initialized = true;
     }
     const double measured_derivative =
