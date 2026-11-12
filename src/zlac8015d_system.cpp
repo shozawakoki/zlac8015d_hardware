@@ -142,6 +142,9 @@ hardware_interface::CallbackReturn Zlac8015dSystemHardware::on_init(
        get_string_parameter(info_, "pid_bumpless_handoff", "false") == "1");
     pid_derivative_filter_tau_s_ =
       get_double_parameter(info_, "pid_derivative_filter_tau_s", 0.05);
+    RCLCPP_INFO(
+      rclcpp::get_logger("Zlac8015dSystemHardware"),
+      "PI bumpless handoff: %s", pid_bumpless_handoff_ ? "enabled" : "disabled");
 
     left_ladrc_.b0 = get_double_parameter(info_, "ladrc_b0_left", 1.0);
     right_ladrc_.b0 = get_double_parameter(info_, "ladrc_b0_right", 1.0);
