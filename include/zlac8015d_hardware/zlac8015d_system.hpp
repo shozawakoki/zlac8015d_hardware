@@ -50,6 +50,10 @@ private:
     // BREAKAWAY / TRACK state
     // --------------------------------------------------------
     bool tracking{false};
+    bool pi_transitioning{false};
+    double pi_transition_elapsed_s{0.0};
+    double pi_transition_start_current_a{0.0};
+    double pi_transition_start_speed_rad_s{0.0};
 
     int start_count{0};
     int stall_count{0};
@@ -120,7 +124,9 @@ private:
   double pid_kp_{0.7};  // [A/(rad/s)]
   double pid_ki_{0.5};  // [A/rad]
   double pid_kd_{0.03}; // [A*s/rad]
-  bool pid_bumpless_handoff_{false}; // opt-in PI integral tracking on TRACK entry
+  bool pid_bumpless_handoff_{false}; // legacy PI handoff option
+  bool pid_three_stage_transition_{false};
+  double pid_transition_duration_s_{0.10};
   double pid_derivative_filter_tau_s_{0.05}; // [s]
   // Tunable start/recovery thresholds. Interpret step_samples against the
   // ros2_control update rate (nominally 200 Hz); no changes while running.
