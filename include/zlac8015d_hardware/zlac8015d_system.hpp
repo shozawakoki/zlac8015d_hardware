@@ -53,6 +53,9 @@ private:
 
     int start_count{0};
     int stall_count{0};
+    // Limit repeated automatic starts within one nonzero-speed command.
+    int stall_recovery_attempts{0};
+    bool stall_lockout{false};
 
     int breakaway_count{0};
     double breakaway_target{0.65};
