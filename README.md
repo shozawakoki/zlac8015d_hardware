@@ -1,3 +1,66 @@
+## TRACK移行・再始動判定の修正（fix/track-handoff-stall-gate）
+
+このブランチは `devel/startup-stall-rework` から分岐しています。
+`main`、`devel/pid`、`devel/startup-stall-rework` は変更していません。
+
+- **TRACKへの移行**: 始動時の大きな電流下限をTRACK区間まで
+  引き継がず、0.20 Aの通常下限に戻します。電流指令の変化は従来の
+  `current_rate_limit_a_per_s` によるレート制限で行います。
+- **失速判定**: 正方向に低速であること、TRACK移行後の150 msが
+  経過していること、一定期間駆動電流を要求していることに加え、
+  駆動要求と実際の指令が少なくとも
+  `max(stall_min_drive_current_a, breakaway_start_a)` [A]
+  以上であることを必要とします。従来の `0.20 A` 指令では
+  再始動しません。
+- **繰り返し再始動の抑制**: 非ゼロ速度の指令期間中に自動再始動は
+  1回までとし、再び失速が判定された場合は左右輪の電流指令を
+  ゼロに固定します。`stall_lockout_left/right` が内部CSVに記録されます。
+  このラッチはゼロ速度指令を受けて解除されます。
+- **安全監視は維持**: CAN通信、速度フィードバック、電流上限などの
+  既存監視は削除しません。追加の起動可否チェックやテスト用ノードは
+  増やしていません。
+
+この変更により **P制御だけで安定な速度追従を保証するものではありません**。
+例えばKp=0.2、目標速度0.10 m/s（車輪目標1.5625 rad/s）では、
+停止近傍の比例指令は約0.313 Aです。静止摩擦を突破できない場合、
+不要な再始動が抑えられても、速度が低いまま残る可能性があります。
+PI/LADRCの本来の追従性能は、始動補償と区別して評価してください。
+
+### 最小限の確認方法
+
+bringup側は変更不要です。すでに用意した
+`zlac_can_bringup/devel/staircase-evaluation` と
+`~/pid_startup_test.yaml` をそのまま利用できます。
+
+```bash
+source /opt/ros/humble/setup.bash
+cd ~/ros2_ws/src/zlac8015d_hardware
+git fetch origin
+git switch fix/track-handoff-stall-gate
+git pull --ff-only
+
+cd ~/ros2_ws
+colcon build --packages-select zlac8015d_hardware --symlink-install
+source install/setup.bash
+
+# 1条件の設定を確認。モータは動かない。
+ros2 run zlac_can_bringup run_gain_sweep.py --config ~/pid_startup_test.yaml
+```
+
+初回実機試験は車輪を浮かせ、独立した非常停止装置と通信断時の
+停止機能を確認したうえで**PIDの1条件だけ**実行してください。
+`--execute --i-have-e-stop` は実機の速度指令を送信します。
+ソフトウェアで指令電流をゼロにしても、惰性やCAN通信障害時の停止は
+保証されません。
+
+確認する値は、①最大車輪角速度、②速度指令中の
+`TRACK→BREAKAWAY` 回数、③ `stall_lockout_left/right`、
+④試験が安全に停止したか、の4点のみです。
+
+ビルド・実機試験はまだ未検証です。
+
+---
+
 ## 始動・失速復帰の再設計（devel/startup-stall-rework）
 
 この作業ブランチは `devel/pid` から分岐し、PID/LADRC 共通の
