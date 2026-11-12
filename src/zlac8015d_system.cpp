@@ -1,5 +1,5 @@
 #include "zlac8015d_hardware/zlac8015d_system.hpp"
-#include "zlac8015d_hardware/pi_transition.hpp"
+#include "zlac8015d_hardware/pi_transition_lifecycle.hpp"
 
 #include <linux/can.h>
 #include <linux/can/raw.h>
@@ -325,8 +325,7 @@ hardware_interface::CallbackReturn Zlac8015dSystemHardware::on_activate(
   left_ladrc_.last_current_cmd = 0.0;
   left_ladrc_.initialized = false;
   left_ladrc_.tracking = false;
-  left_ladrc_.pi_transitioning = false;
-  left_ladrc_.pi_transition_elapsed_s = 0.0;
+  cancel_pi_transition(left_ladrc_);
   left_ladrc_.start_count = 0;
   left_ladrc_.stall_count = 0;
   left_ladrc_.stall_recovery_attempts = 0;
@@ -342,8 +341,7 @@ hardware_interface::CallbackReturn Zlac8015dSystemHardware::on_activate(
   right_ladrc_.last_current_cmd = 0.0;
   right_ladrc_.initialized = false;
   right_ladrc_.tracking = false;
-  right_ladrc_.pi_transitioning = false;
-  right_ladrc_.pi_transition_elapsed_s = 0.0;
+  cancel_pi_transition(right_ladrc_);
   right_ladrc_.start_count = 0;
   right_ladrc_.stall_count = 0;
   right_ladrc_.stall_recovery_attempts = 0;
@@ -1087,16 +1085,10 @@ hardware_interface::return_type Zlac8015dSystemHardware::write(
     right_ladrc_.tracking = true;
     if (control_mode_ == ControlMode::PID_TORQUE &&
         pid_three_stage_transition_ && !normal_stop_ramp_active_) {
-      left_ladrc_.pi_transitioning = true;
-      right_ladrc_.pi_transitioning = true;
-      left_ladrc_.pi_transition_elapsed_s = 0.0;
-      right_ladrc_.pi_transition_elapsed_s = 0.0;
-      left_ladrc_.pi_transition_start_current_a = left_ladrc_.last_current_cmd;
-      right_ladrc_.pi_transition_start_current_a = right_ladrc_.last_current_cmd;
-      left_ladrc_.pi_transition_start_speed_rad_s =
-        std::abs(hw_velocities_[0]);
-      right_ladrc_.pi_transition_start_speed_rad_s =
-        std::abs(hw_velocities_[1]);
+      begin_pi_transition(left_ladrc_, left_ladrc_.last_current_cmd,
+        std::abs(hw_velocities_[0]));
+      begin_pi_transition(right_ladrc_, right_ladrc_.last_current_cmd,
+        std::abs(hw_velocities_[1]));
     }
 
     left_ladrc_.stall_count = 0;
@@ -1154,7 +1146,7 @@ hardware_interface::return_type Zlac8015dSystemHardware::write(
          const int direction)
       {
         state.tracking = false;
-        state.pi_transitioning = false;
+        cancel_pi_transition(state);
 
         state.start_count = 0;
         state.stall_count = 0;
@@ -1309,8 +1301,7 @@ double Zlac8015dSystemHardware::compute_current_command(
     state.track_hold_start = TRACK_FLOOR_A;
 
     state.direction_sign = 0;
-    state.pi_transitioning = false;
-    state.pi_transition_elapsed_s = 0.0;
+    cancel_pi_transition(state);
     pid_state = PidState{};
 
     return 0.0;
@@ -1351,8 +1342,7 @@ double Zlac8015dSystemHardware::compute_current_command(
 
     state.track_hold_count = 0;
     state.track_hold_start = TRACK_FLOOR_A;
-    state.pi_transitioning = false;
-    state.pi_transition_elapsed_s = 0.0;
+    cancel_pi_transition(state);
     pid_state = PidState{};
   }
 
@@ -1432,11 +1422,8 @@ double Zlac8015dSystemHardware::compute_current_command(
       state.stall_count = 0;
       if (control_mode_ == ControlMode::PID_TORQUE &&
           pid_three_stage_transition_ && !normal_stop_ramp_active_) {
-        state.pi_transitioning = true;
-        state.pi_transition_elapsed_s = 0.0;
-        state.pi_transition_start_current_a = state.last_current_cmd;
-        state.pi_transition_start_speed_rad_s =
-          speed_in_command_direction;
+        begin_pi_transition(state, state.last_current_cmd,
+          speed_in_command_direction);
       }
 
       state.track_hold_count = 0;
@@ -1596,20 +1583,12 @@ double Zlac8015dSystemHardware::compute_current_command(
   // Independent transition assist is evaluated by a pure, testable helper.
   // PI integral is not initialized from BREAKAWAY current.
   if (state.pi_transitioning) {
-    state.pi_transition_elapsed_s += dt;
-    const auto result = compute_pi_transition(
-      raw_current_request,
-      state.pi_transition_start_current_a,
-      state.pi_transition_start_speed_rad_s,
-      speed_in_command_direction,
-      std::abs(velocity_reference),
-      state.pi_transition_elapsed_s,
-      pid_transition_duration_s_,
+    current_command = advance_pi_transition(
+      state, raw_current_request, speed_in_command_direction,
+      std::abs(velocity_reference), dt, pid_transition_duration_s_,
       direction,
       normal_stop_ramp_active_ ||
         control_mode_ != ControlMode::PID_TORQUE);
-    current_command = result.requested_current_a;
-    state.pi_transitioning = result.active;
   }
 
   // TRACK Imax
@@ -1735,8 +1714,7 @@ double Zlac8015dSystemHardware::compute_current_command(
     pid_state = PidState{};
 
     state.tracking = false;
-    state.pi_transitioning = false;
-    state.pi_transition_elapsed_s = 0.0;
+    cancel_pi_transition(state);
 
     state.start_count = 0;
     state.stall_count = 0;
