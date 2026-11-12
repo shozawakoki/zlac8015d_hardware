@@ -63,3 +63,30 @@ Do **not** select physical-test current limits or emergency-stop timing from
 this simplified plant. The next milestone is an integration-capable simulated
 hardware plugin that runs the actual controller's PI/stop state machine, plus
 verified CAN-loss safety behavior before any motor motion.
+
+## Investigate why three-stage and legacy PI look nearly identical
+
+Run the same simulator as before, then inspect the existing time-series CSVs:
+
+```bash
+cd ~/ros2_ws/src/zlac8015d_hardware
+git pull --ff-only
+python3 tests/analyze_pi_transition.py /tmp/pi_three_stage_sim
+```
+
+This produces `/tmp/pi_three_stage_sim/transition_diagnostics.json` and a
+console table with: transition entry time and wheel speed, fraction of speed
+reference at entry, transition flag duration, maximum **applied-current
+difference** between three-stage and legacy, and the count of samples with a
+nonzero applied-current difference.
+
+Important: `pi_transitioning=1` by itself does **not** indicate effective
+assistance. The helper immediately cancels if speed reaches 80% of target,
+raw PI has opposite polarity, or transition timeout is reached. Also the
+current slew limiter and minimum drive current can make distinct requested
+currents result in identical applied commands. The analysis compares the
+final logged current commands; it does not log or reconstruct exact
+pre-limiter requested assistance.
+
+This is a diagnostic of the *existing simplified simulator*, not proof that
+the full production C++ controller state machine behaves identically.
