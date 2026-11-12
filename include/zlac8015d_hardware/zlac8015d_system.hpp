@@ -118,6 +118,17 @@ private:
   double pid_ki_{0.5};  // [A/rad]
   double pid_kd_{0.03}; // [A*s/rad]
   double pid_derivative_filter_tau_s_{0.05}; // [s]
+  // Tunable start/recovery thresholds. Interpret step_samples against the
+  // ros2_control update rate (nominally 200 Hz); no changes while running.
+  double breakaway_start_a_{0.65};
+  double breakaway_step_a_{0.10};
+  double breakaway_max_a_{2.00};
+  int breakaway_step_samples_{20};
+  double breakaway_start_speed_rad_s_{0.30};
+  int breakaway_start_samples_{6};
+  double stall_speed_rad_s_{0.10};
+  int stall_samples_{80};
+  double stall_min_drive_current_a_{0.20};
   int sync_track_count_{0};
   double controller_bandwidth_{5.0};       // wc [rad/s]
   double observer_bandwidth_{20.0};        // wo [rad/s]
