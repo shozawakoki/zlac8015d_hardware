@@ -142,6 +142,10 @@ hardware_interface::CallbackReturn Zlac8015dSystemHardware::on_init(
        get_string_parameter(info_, "pid_bumpless_handoff", "false") == "1");
     pid_derivative_filter_tau_s_ =
       get_double_parameter(info_, "pid_derivative_filter_tau_s", 0.05);
+    pid_three_stage_transition_ =
+      get_string_parameter(info_, "pid_three_stage_transition", "false") == "true";
+    pid_transition_duration_s_ =
+      get_double_parameter(info_, "pid_transition_duration_s", 0.10);
     RCLCPP_INFO(
       rclcpp::get_logger("Zlac8015dSystemHardware"),
       "PI bumpless handoff: %s", pid_bumpless_handoff_ ? "enabled" : "disabled");
@@ -221,7 +225,11 @@ hardware_interface::CallbackReturn Zlac8015dSystemHardware::on_init(
       !std::isfinite(pid_derivative_filter_tau_s_) ||
       pid_kp_ < 0.0 || pid_ki_ < 0.0 || pid_kd_ < 0.0 ||
       (pid_kp_ + pid_ki_ + pid_kd_) <= 0.0 ||
-      pid_derivative_filter_tau_s_ <= 0.0)
+      pid_derivative_filter_tau_s_ <= 0.0 ||
+      !std::isfinite(pid_transition_duration_s_) ||
+      pid_transition_duration_s_ < 0.02 ||
+      pid_transition_duration_s_ > 0.30 ||
+      (pid_three_stage_transition_ && pid_bumpless_handoff_))
   {
     RCLCPP_ERROR(rclcpp::get_logger("Zlac8015dSystemHardware"),
       "Invalid PID gains or derivative filter constant.");
@@ -311,6 +319,8 @@ hardware_interface::CallbackReturn Zlac8015dSystemHardware::on_activate(
   left_ladrc_.last_current_cmd = 0.0;
   left_ladrc_.initialized = false;
   left_ladrc_.tracking = false;
+  left_ladrc_.pi_transitioning = false;
+  left_ladrc_.pi_transition_elapsed_s = 0.0;
   left_ladrc_.start_count = 0;
   left_ladrc_.stall_count = 0;
   left_ladrc_.stall_recovery_attempts = 0;
@@ -326,6 +336,8 @@ hardware_interface::CallbackReturn Zlac8015dSystemHardware::on_activate(
   right_ladrc_.last_current_cmd = 0.0;
   right_ladrc_.initialized = false;
   right_ladrc_.tracking = false;
+  right_ladrc_.pi_transitioning = false;
+  right_ladrc_.pi_transition_elapsed_s = 0.0;
   right_ladrc_.start_count = 0;
   right_ladrc_.stall_count = 0;
   right_ladrc_.stall_recovery_attempts = 0;
@@ -673,7 +685,8 @@ hardware_interface::return_type Zlac8015dSystemHardware::write(
           if (control_mode_ == ControlMode::PID_TORQUE) {
             csv_log
               << ",pid_integral_left_A,pid_integral_right_A"
-              << ",pid_dvel_left_rad_s2,pid_dvel_right_rad_s2";
+              << ",pid_dvel_left_rad_s2,pid_dvel_right_rad_s2"
+              << ",pi_transition_left,pi_transition_right";
           }
           csv_log << '\n';
 
@@ -717,7 +730,9 @@ hardware_interface::return_type Zlac8015dSystemHardware::write(
             << "," << left_pid_.integral_current
             << "," << right_pid_.integral_current
             << "," << left_pid_.filtered_velocity_derivative
-            << "," << right_pid_.filtered_velocity_derivative;
+            << "," << right_pid_.filtered_velocity_derivative
+            << "," << static_cast<int>(left_ladrc_.pi_transitioning)
+            << "," << static_cast<int>(right_ladrc_.pi_transitioning);
         }
         csv_log << '\n';
 
@@ -976,6 +991,8 @@ hardware_interface::return_type Zlac8015dSystemHardware::write(
     !zero_stop_hold_ &&
     left_ladrc_.tracking &&
     right_ladrc_.tracking &&
+    !left_ladrc_.pi_transitioning &&
+    !right_ladrc_.pi_transitioning &&
     left_ladrc_.track_hold_count >= 30 &&
     right_ladrc_.track_hold_count >= 30;
 
@@ -1062,6 +1079,19 @@ hardware_interface::return_type Zlac8015dSystemHardware::write(
   {
     left_ladrc_.tracking = true;
     right_ladrc_.tracking = true;
+    if (control_mode_ == ControlMode::PID_TORQUE &&
+        pid_three_stage_transition_ && !normal_stop_ramp_active_) {
+      left_ladrc_.pi_transitioning = true;
+      right_ladrc_.pi_transitioning = true;
+      left_ladrc_.pi_transition_elapsed_s = 0.0;
+      right_ladrc_.pi_transition_elapsed_s = 0.0;
+      left_ladrc_.pi_transition_start_current_a = left_ladrc_.last_current_cmd;
+      right_ladrc_.pi_transition_start_current_a = right_ladrc_.last_current_cmd;
+      left_ladrc_.pi_transition_start_speed_rad_s =
+        std::abs(hw_velocities_[0]);
+      right_ladrc_.pi_transition_start_speed_rad_s =
+        std::abs(hw_velocities_[1]);
+    }
 
     left_ladrc_.stall_count = 0;
     right_ladrc_.stall_count = 0;
@@ -1118,6 +1148,7 @@ hardware_interface::return_type Zlac8015dSystemHardware::write(
          const int direction)
       {
         state.tracking = false;
+        state.pi_transitioning = false;
 
         state.start_count = 0;
         state.stall_count = 0;
