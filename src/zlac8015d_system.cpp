@@ -1271,6 +1271,11 @@ double Zlac8015dSystemHardware::compute_current_command(
     return 0.0;
   }
 
+  // Only a zero-speed reference clears a repeated-stall lockout.
+  if (state.stall_lockout) {
+    state.last_current_cmd = 0.0;
+    return 0.0;
+  }
 
   const int direction =
     velocity_reference >= 0.0 ? +1 : -1;
@@ -1380,8 +1385,9 @@ double Zlac8015dSystemHardware::compute_current_command(
       state.stall_count = 0;
 
       state.track_hold_count = 0;
-      state.track_hold_start =
-        state.breakaway_target;
+      // The existing slew limiter keeps current continuous on handoff.
+      // Do not keep the high BREAKAWAY floor in TRACK.
+      state.track_hold_start = TRACK_FLOOR_A;
 
       // Start TRACK observer from the measured state.
       state.z1 = velocity_measured;
@@ -1540,19 +1546,10 @@ double Zlac8015dSystemHardware::compute_current_command(
   // TRACK_HOLD / current floor
   // ==========================================================
 
-  double floor_a = TRACK_FLOOR_A;
-
+  // Count the TRACK settling interval for synchronization, but do not
+  // impose a prolonged BREAKAWAY-current floor after control handoff.
+  const double floor_a = TRACK_FLOOR_A;
   if (state.track_hold_count < TRACK_HOLD_SAMPLES) {
-
-    const double ratio =
-      static_cast<double>(state.track_hold_count) /
-      static_cast<double>(TRACK_HOLD_SAMPLES);
-
-    floor_a =
-      state.track_hold_start +
-      (TRACK_FLOOR_A - state.track_hold_start) *
-      ratio;
-
     ++state.track_hold_count;
   }
 
@@ -1615,13 +1612,19 @@ double Zlac8015dSystemHardware::compute_current_command(
   // be interpreted as a static-friction stall.
   const double driving_request =
     static_cast<double>(direction) * raw_current_request;
+  // A controller request weaker than the start current is not grounds
+  // for another BREAKAWAY cycle. E.g. at 0.10 m/s, Kp=0.2 requests
+  // only 0.3125 A at rest while start current is 0.65 A.
+  const double retry_current_threshold =
+    std::max(stall_min_drive_current_a_, breakaway_start_a_);
   const bool genuinely_stalled =
     !normal_stop_ramp_active_ &&
+    state.track_hold_count >= TRACK_HOLD_SAMPLES &&
     speed_in_command_direction >= -STALL_SPEED_RAD_S &&
     speed_in_command_direction < STALL_SPEED_RAD_S &&
-    driving_request >= stall_min_drive_current_a_ &&
+    driving_request >= retry_current_threshold &&
     static_cast<double>(direction) * current_command >=
-      stall_min_drive_current_a_;
+      retry_current_threshold;
   if (genuinely_stalled) {
     ++state.stall_count;
   } else {
@@ -1630,6 +1633,17 @@ double Zlac8015dSystemHardware::compute_current_command(
 
 
   if (state.stall_count >= STALL_SAMPLES) {
+    state.stall_count = 0;
+    if (state.stall_recovery_attempts >= 1) {
+      state.stall_lockout = true;
+      state.last_current_cmd = 0.0;
+      RCLCPP_ERROR(
+        rclcpp::get_logger("Zlac8015dSystemHardware"),
+        "Repeated stall: both wheel current commands locked to zero until "
+        "a zero-speed reference is received.");
+      return 0.0;
+    }
+    ++state.stall_recovery_attempts;
     pid_state = PidState{};
 
     state.tracking = false;
