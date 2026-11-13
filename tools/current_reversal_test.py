@@ -47,8 +47,9 @@ def parse_args(argv=None):
                    help="abort on absolute RPM of either wheel, default 45")
     p.add_argument("--max-forward-s", type=float, default=0.25,
                    help="abort if no forward RPM trigger within this period")
-    p.add_argument("--max-reverse-s", type=float, default=0.40,
-                   help="abort if no reverse confirmation after sign change")
+    p.add_argument("--max-reverse-s", type=float, default=None,
+                   help="abort if no reverse confirmation after sign change "
+                        "(default 0.4s speed mode, 2.0s timed mode)")
     p.add_argument("--loop-hz", type=float, default=100.0)
     p.add_argument("--feedback-timeout-ms", type=float, default=100.0)
     p.add_argument("--settle-seconds", type=float, default=1.0)
@@ -63,7 +64,10 @@ def parse_args(argv=None):
     p.add_argument("--confirm-exclusive-can", action="store_true")
     p.add_argument("--confirm-regeneration-safe", action="store_true",
                    help="I verified the drive/supply supports braking regeneration")
-    return p.parse_args(argv)
+    args = p.parse_args(argv)
+    if args.max_reverse_s is None:
+        args.max_reverse_s = 2.0 if args.switch_after_s is not None else 0.4
+    return args
 
 
 def preflight(args):
@@ -90,9 +94,12 @@ def preflight(args):
         raise ValueError("reverse-confirm-rpm must be 1..5 rpm")
     if not (args.switch_rpm + 10.0 <= args.max_speed_rpm <= 60.0):
         raise ValueError("speed cutoff must exceed switch-rpm by >=10 rpm and be <=60 rpm")
+    reverse_timeout_cap = 2.0 if args.switch_after_s is not None else 0.8
     if not (0.05 <= args.max_forward_s <= 0.5 and
-            0.1 <= args.max_reverse_s <= 0.8):
-        raise ValueError("forward/reversal timeouts must be within 0.05..0.5 / 0.1..0.8 s")
+            0.1 <= args.max_reverse_s <= reverse_timeout_cap):
+        raise ValueError(
+            f"forward timeout must be 0.05..0.5 s; "
+            f"reverse timeout must be 0.1..{reverse_timeout_cap:.1f} s")
     if not (50.0 <= args.loop_hz <= 200.0 and
             30.0 <= args.feedback_timeout_ms <= 150.0):
         raise ValueError("invalid feedback or refresh rates")
