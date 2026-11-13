@@ -306,8 +306,10 @@ class ZlacCurrentTester:
         status = self.sdo_read(0x6041, 0)
         left_raw = self.sdo_read(0x6071, 1)
         right_raw = self.sdo_read(0x6071, 2)
-        self.readback_status_l = status & 0xFFFF
-        self.readback_status_r = (status >> 16) & 0xFFFF
+        # ZLAC8015D V4 6041h: high16=LEFT, low16=RIGHT.
+        self.readback_status_l = (status >> 16) & 0xFFFF
+        self.readback_status_r = status & 0xFFFF
+        self.require_motors_available(status)
         self.readback_left = -self.signed16(left_raw) / 1000.0
         self.readback_right = self.signed16(right_raw) / 1000.0
         print(
@@ -317,10 +319,26 @@ class ZlacCurrentTester:
             f"status left/right=0x{self.readback_status_l:04X}/0x{self.readback_status_r:04X}",
             flush=True)
         self.log("active_target_readback")
-        if ((self.readback_status_l & 0x006F) != 0x0027 or
-                (self.readback_status_r & 0x006F) != 0x0027):
-            raise RuntimeError("Drive left Operation enabled state during command; "
-                               "aborting due to changed motor state")
+        # If the state changes during a pulse, require_motors_available()
+        # raises and the outer finally sends zero and disables operation.
+
+    @staticmethod
+    def require_motors_available(status):
+        # The drive's vendor-specific Statusword bit15 indicates an active
+        # EXTERNAL emergency stop. The CiA402 low bits alone are not enough.
+        left = (status >> 16) & 0xFFFF
+        right = status & 0xFFFF
+        if (left & 0x8000) or (right & 0x8000):
+            raise RuntimeError(
+                "EXTERNAL E-STOP indicated by ZLAC8015D 6041h bit15 "
+                f"(left=0x{left:04X}, right=0x{right:04X}). "
+                "DO NOT bypass safety inputs. Check physical emergency-stop "
+                "circuit and X0/X1 inputs with power isolated before further "
+                "current tests.")
+        if (left & 0x006F) != 0x0027 or (right & 0x006F) != 0x0027:
+            raise RuntimeError("Both motors must be Operation Enabled "
+                               "(6041 upper16=left, lower16=right); "
+                               "refusing nonzero current")
 
     def configure_feedback(self, comm, mapping, cob, objects, event_ms):
         self.sdo(comm, 1, 0x80000000 | cob, 32)
@@ -362,14 +380,12 @@ class ZlacCurrentTester:
         self.command(0.0)
         sw = self.sdo_read(0x6041, 0)
         mode = self.sdo_read(0x6061, 0)
-        sw_lo = sw & 0xFFFF
-        sw_hi = (sw >> 16) & 0xFFFF
+        sw_l = (sw >> 16) & 0xFFFF
+        sw_r = sw & 0xFFFF
         print(f"Drive readback: packed 6041 statusword=0x{sw:08X}, "
-              f"lower16=0x{sw_lo:04X}, upper16=0x{sw_hi:04X}; "
-              f"mode-display={mode} (expected 4=Profile Torque)")
-        if (sw_lo & 0x006F) != 0x0027 or (sw_hi & 0x006F) != 0x0027:
-            raise RuntimeError("Both motors must be Operation Enabled "
-                               "(6041 lower16 and upper16); refusing nonzero current")
+              f"left/upper16=0x{sw_l:04X}, right/lower16=0x{sw_r:04X}; "
+              f"mode-display={mode} (expected 4=Profile Torque)", flush=True)
+        self.require_motors_available(sw)
         if mode != 4:
             raise RuntimeError("Drive mode is not Profile Torque (6061 display); "
                                "refusing any nonzero current")
