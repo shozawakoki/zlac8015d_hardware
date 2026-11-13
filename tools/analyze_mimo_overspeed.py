@@ -23,6 +23,14 @@ REQUIRED = (
 )
 
 
+def number_or_none(value):
+    try:
+        x = float(value)
+        return x if math.isfinite(x) else None
+    except (TypeError, ValueError):
+        return None
+
+
 def number(row, key):
     try:
         x = float(row[key])
@@ -142,7 +150,8 @@ def summarize(rows, limit, speed_error, v_error, omega_error, min_v, min_omega):
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("csv_file", help="MIMO LADRC runtime CSV from existing log")
-    p.add_argument("--limit-a", type=float, default=2.0)
+    p.add_argument("--limit-a", type=float, default=8.0,
+                   help="actual URDF current_limit_a; NOT breakaway_max_a (branch: 8 A)")
     p.add_argument("--wheel-error", type=float, default=0.5, help="wheel rad/s")
     p.add_argument("--v-error", type=float, default=0.10, help="body m/s")
     p.add_argument("--omega-error", type=float, default=0.3, help="body rad/s")
@@ -167,7 +176,19 @@ def main(argv=None):
     except ValueError as exc:
         p.error(str(exc))
     relevant = results["composite"]
+    logged_currents = [
+        abs(value) for row in rows
+        for col in ("cmd_current_left_A", "cmd_current_right_A")
+        if (value := number_or_none(row.get(col))) is not None
+    ]
+    observed_peak = max(logged_currents) if logged_currents else 0.0
+    if observed_peak > args.limit_a + 0.05:
+        p.error(f"--limit-a={args.limit_a:g} A is inconsistent with logged "
+                f"|Icmd| peak {observed_peak:.3f} A. "
+                "Use the URDF hardware current_limit_a, not breakaway_max_a.")
     print(f"Source: {file}")
+    print(f"Observed peak |Icmd|: {observed_peak:.3f} A; "
+          f"assumed controller hard current limit: {args.limit_a:.3f} A")
     print(f"Total valid rows: {len(results['all'])}; "
           f"composite v+omega rows: {len(relevant)}")
     print(f"Composite definition: |v_ref| >= {args.min_v} m/s, "
