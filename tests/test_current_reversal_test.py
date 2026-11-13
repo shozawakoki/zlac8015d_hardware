@@ -40,6 +40,11 @@ class FakeTester:
     def read_preflight_snapshot(self):
         pass
 
+    def sdo_read(self, index, subindex, timeout_s=0.15):
+        if (index, subindex) == (0x2008, 0):
+            return 370
+        raise AssertionError("Unexpected SDO read")
+
     def check_safety(self, now):
         if abs(self.rpm_l) > self.max_rpm or abs(self.rpm_r) > self.max_rpm:
             raise RuntimeError("Overspeed")
@@ -172,6 +177,21 @@ class ReversalTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "opposite"):
                 rev.run_reversal(tester, args)
 
+
+    def test_drive_speed_setting_check_rejects_mismatch(self):
+        args = self.parse("--max-speed-rpm", "45")
+        tester = FakeSequenceTester(Clock(), [])
+        self.assertEqual(rev.check_configured_drive_speed(tester, args), 370)
+        tester.sdo_read = lambda *_args, **_kw: 30
+        with self.assertRaisesRegex(RuntimeError, "exceeds drive"):
+            rev.check_configured_drive_speed(tester, args)
+
+    def test_drive_speed_setting_readback_invalid(self):
+        args = self.parse()
+        tester = FakeSequenceTester(Clock(), [])
+        tester.sdo_read = lambda *_args, **_kw: 0
+        with self.assertRaisesRegex(RuntimeError, "Invalid 2008h"):
+            rev.check_configured_drive_speed(tester, args)
 
     def test_timed_five_second_hold_then_reverse(self):
         args = self.parse("--switch-after-s", "5.0")
