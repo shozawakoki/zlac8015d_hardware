@@ -165,6 +165,10 @@ def run_reversal(tester, args):
         if can_id != 0x180 + tester.node:
             continue  # only fresh velocity TPDO can cause phase transition
         rpm = selected_rpm(tester, args.wheel)
+        other_rpm = tester.rpm_r if args.wheel == "left" else tester.rpm_l
+        if abs(other_rpm) > 5.0:
+            raise RuntimeError(
+                f"Uncommanded other wheel rotation: {other_rpm:+.1f} rpm")
         if phase == "forward":
             if rpm < -args.settle_max_rpm:
                 raise RuntimeError("Wheel rotating opposite to requested forward torque")
