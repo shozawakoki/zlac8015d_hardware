@@ -320,11 +320,14 @@ class ZlacCurrentTester:
         self.command(0.0)
         sw = self.sdo_read(0x6041, 0)
         mode = self.sdo_read(0x6061, 0)
-        print(f"Drive readback: CiA402 statusword=0x{sw:04X}, "
+        sw_lo = sw & 0xFFFF
+        sw_hi = (sw >> 16) & 0xFFFF
+        print(f"Drive readback: packed 6041 statusword=0x{sw:08X}, "
+              f"lower16=0x{sw_lo:04X}, upper16=0x{sw_hi:04X}; "
               f"mode-display={mode} (expected 4=Profile Torque)")
-        if (sw & 0x006F) != 0x0027:
-            raise RuntimeError("Drive is not Operation Enabled (6041 statusword); "
-                               "refusing any nonzero current")
+        if (sw_lo & 0x006F) != 0x0027 or (sw_hi & 0x006F) != 0x0027:
+            raise RuntimeError("Both motors must be Operation Enabled "
+                               "(6041 lower16 and upper16); refusing nonzero current")
         if mode != 4:
             raise RuntimeError("Drive mode is not Profile Torque (6061 display); "
                                "refusing any nonzero current")
