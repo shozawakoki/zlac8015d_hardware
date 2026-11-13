@@ -98,7 +98,7 @@ class CurrentStepTest(unittest.TestCase):
         self.tester.sdo = Mock()
         self.tester.command = Mock()
         self.tester.sdo_read = Mock(side_effect=[0x0023, 4])
-        with self.assertRaisesRegex(RuntimeError, "not Operation Enabled"):
+        with self.assertRaisesRegex(RuntimeError, "Both motors must be Operation Enabled"):
             self.tester.setup()
         self.tester.command.assert_called_with(0.0)
 
