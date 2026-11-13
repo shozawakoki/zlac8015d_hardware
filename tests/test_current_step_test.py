@@ -86,6 +86,40 @@ class CurrentStepTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "Overspeed"):
             self.tester.check_safety(1.0)
 
+    def test_statusword_sdo_read(self):
+        self.tester.receive = Mock(return_value=(
+            0x581, bytes([0x4B, 0x41, 0x60, 0x00, 0x27, 0, 0, 0]), 1.0))
+        self.assertEqual(self.tester.sdo_read(0x6041, 0), 0x0027)
+        self.tester.send.assert_called_with(
+            0x601, bytes([0x40, 0x41, 0x60, 0, 0, 0, 0, 0]))
+
+    def test_reject_drive_not_enabled(self):
+        self.tester.configure_feedback = Mock()
+        self.tester.sdo = Mock()
+        self.tester.command = Mock()
+        self.tester.sdo_read = Mock(side_effect=[0x0023, 4])
+        with self.assertRaisesRegex(RuntimeError, "not Operation Enabled"):
+            self.tester.setup()
+        self.tester.command.assert_called_with(0.0)
+
+    def test_reject_wrong_mode_display(self):
+        self.tester.configure_feedback = Mock()
+        self.tester.sdo = Mock()
+        self.tester.command = Mock()
+        self.tester.sdo_read = Mock(side_effect=[0x0027, 3])
+        with self.assertRaisesRegex(RuntimeError, "not Profile Torque"):
+            self.tester.setup()
+
+    def test_reject_no_current_no_motion(self):
+        self.tester.process_feedback((0x181, struct.pack("<ii", 0, 0), 1.0),
+                                     log=False)
+        self.tester.process_feedback((0x281, struct.pack("<hh", 0, 0), 1.0),
+                                     log=False)
+        self.tester.command_l = 2.0
+        self.tester.step_started = 1.0
+        with self.assertRaisesRegex(RuntimeError, "No actuator response"):
+            self.tester.check_safety(1.8)
+
     def test_stale_feedback_trip(self):
         self.tester.process_feedback((0x181, struct.pack("<ii", 0, 0), 1.0),
                                      log=False)
