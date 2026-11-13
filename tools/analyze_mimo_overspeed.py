@@ -207,6 +207,16 @@ def main(argv=None):
         ("Percent with one or both TRACK flags off", "not_both_tracking_pct", "%"),
     ):
         print(f"{name}: {results[key]:.3f} {unit}")
+    if relevant:
+        for label, field in (("Worst linear-speed error", "error_v_m_s"),
+                             ("Worst angular-speed error", "error_omega_rad_s")):
+            peak = max(relevant, key=lambda x: x[field])
+            print(f"{label}: t={peak['time_s']:.3f} s, "
+                  f"absolute error={peak[field]:.3f}, "
+                  f"IcmdL/R={peak['cmd_left_A']:+.2f}/"
+                  f"{peak['cmd_right_A']:+.2f} A, "
+                  f"bothTRACK={peak['both_tracking']}, "
+                  f"saturated={peak['either_saturated']}")
     print("\nFirst 20 composite-motion saturation segments: start_s, end_s, samples")
     for a,b,n in results["segments"][:20]:
         print(f"  {a:.3f}, {b:.3f}, {n}")
