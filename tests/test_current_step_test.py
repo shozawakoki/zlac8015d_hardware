@@ -1,0 +1,99 @@
+#!/usr/bin/env python3
+"""Offline unit checks for tools/current_step_test.py; no CAN hardware needed."""
+
+import csv
+import io
+import importlib.util
+from pathlib import Path
+import struct
+import sys
+import unittest
+from unittest.mock import Mock
+
+SCRIPT = Path(__file__).resolve().parents[1] / "tools" / "current_step_test.py"
+spec = importlib.util.spec_from_file_location("zlac_current_step_test", SCRIPT)
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+
+
+class CurrentStepTest(unittest.TestCase):
+    def setUp(self):
+        self.rows = io.StringIO()
+        self.writer = csv.DictWriter(self.rows, fieldnames=mod.CSV_FIELDS)
+        self.writer.writeheader()
+        self.args = mod.parser_args([])
+        self.tester = mod.ZlacCurrentTester(self.args, self.writer)
+        self.tester.send = Mock()
+
+    def test_profile_exact_sequence(self):
+        self.assertEqual(mod.parse_profile(self.args.profile), (2, 4, -4, -2, 6, -2, 4))
+        self.assertEqual(self.args.step_seconds, 3.0)
+        self.assertFalse(self.args.execute)
+
+    def test_default_safety_denies_full_profile(self):
+        self.args.execute = True
+        with self.assertRaisesRegex(ValueError, "needs 6 A"):
+            mod.preflight(self.args, mod.PROFILE_A)
+
+    def test_left_sign_and_target_encoding(self):
+        self.tester.command(2.0)
+        self.tester.send.assert_called_once_with(
+            0x201, struct.pack("<hh", -2000, 0)
+        )
+        self.assertEqual(self.tester.raw_l, -2000)
+        self.assertEqual(self.tester.raw_r, 0)
+
+    def test_right_sign(self):
+        self.args.wheel = "right"
+        self.tester.command(-2.0)
+        self.tester.send.assert_called_once_with(
+            0x201, struct.pack("<hh", 0, -2000)
+        )
+
+    def test_both_wheels(self):
+        self.args.wheel = "both"
+        self.tester.command(2.0)
+        self.tester.send.assert_called_once_with(
+            0x201, struct.pack("<hh", -2000, 2000)
+        )
+
+    def test_current_above_software_limit_rejected(self):
+        with self.assertRaisesRegex(ValueError, "hard limit"):
+            self.tester.command(4.0)
+
+    def test_can_feedback_conversion_and_csv(self):
+        self.tester.t0 = 1.0
+        self.tester.process_feedback((0x181, struct.pack("<ii", -1250, 2500), 1.010))
+        self.tester.process_feedback((0x281, struct.pack("<hh", -17, 25), 1.015))
+        self.assertAlmostEqual(self.tester.rpm_l, 125.0)
+        self.assertAlmostEqual(self.tester.rpm_r, 250.0)
+        self.assertAlmostEqual(self.tester.measured_l, 1.7)
+        self.assertAlmostEqual(self.tester.measured_r, 2.5)
+        self.assertEqual(self.tester.velocity_rx, 1)
+        self.assertEqual(self.tester.current_rx, 1)
+        self.rows.seek(0)
+        logged = list(csv.DictReader(self.rows))
+        self.assertEqual(len(logged), 2)
+        self.assertEqual(logged[0]["event"], "velocity_rx")
+        self.assertEqual(logged[1]["event"], "current_rx")
+        self.assertAlmostEqual(float(logged[1]["velocity_rx_age_ms"]), 5.0)
+
+    def test_speed_trip(self):
+        self.tester.process_feedback((0x181, struct.pack("<ii", 0, 1250), 1.0),
+                                     log=False)  # right wheel 125 rpm
+        self.tester.process_feedback((0x281, struct.pack("<hh", 0, 0), 1.0),
+                                     log=False)
+        with self.assertRaisesRegex(RuntimeError, "Overspeed"):
+            self.tester.check_safety(1.0)
+
+    def test_stale_feedback_trip(self):
+        self.tester.process_feedback((0x181, struct.pack("<ii", 0, 0), 1.0),
+                                     log=False)
+        self.tester.process_feedback((0x281, struct.pack("<hh", 0, 0), 1.0),
+                                     log=False)
+        with self.assertRaisesRegex(RuntimeError, "timeout"):
+            self.tester.check_safety(1.2)
+
+
+if __name__ == "__main__":
+    unittest.main()
