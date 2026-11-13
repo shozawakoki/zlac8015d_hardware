@@ -5,6 +5,7 @@
 #include <cassert>
 #include <cmath>
 #include <iostream>
+#include <limits>
 using zlac8015d_hardware::mimo::DifferentialDriveModel;
 using zlac8015d_hardware::mimo::Ladrc;
 using zlac8015d_hardware::mimo::Pid;
@@ -125,6 +126,50 @@ int main()
   sampled_pid.reset();
   assert(!sampled_pid.initialized);
   assert(close(sampled_pid.filtered_derivative[0], 0.0));
+
+  // Regression: the recorded failed rotation had target L=+2.766,
+  // R=-2.766 rad/s, but actual L=-5.582, R=-24.588 rad/s.
+  // Both wheels are moving; requiring target-direction motion left the
+  // controller in BREAKAWAY with persistent [+2,-2] A.
+  using zlac8015d_hardware::mimo::moving_for_track;
+  using zlac8015d_hardware::mimo::coordinated_ready_target;
+  assert(moving_for_track(+2.766, -5.582, 0.30, true));
+  assert(moving_for_track(-2.766, -24.588, 0.30, true));
+  assert(!moving_for_track(+2.766, -5.582, 0.30, false));
+  assert(moving_for_track(-2.766, -24.588, 0.30, false));
+  assert(!moving_for_track(+2.766, -0.15, 0.30, true));
+  assert(!moving_for_track(0.0, -24.588, 0.30, true));
+  assert(!moving_for_track(
+    +2.766, std::numeric_limits<double>::quiet_NaN(), 0.30, true));
+  assert(!moving_for_track(+2.766, -5.582, 0.0, true));
+
+  // Both wheels become eligible for the coordinated TRACK transition
+  // after sustained samples rather than staying in BREAKAWAY forever.
+  int samples_left = 0;
+  int samples_right = 0;
+  for (int tick=0; tick<5; ++tick) {
+    samples_left = moving_for_track(+2.766, -5.582, 0.30, true) ?
+      samples_left + 1 : 0;
+    samples_right = moving_for_track(-2.766, -24.588, 0.30, true) ?
+      samples_right + 1 : 0;
+  }
+  assert(samples_left >= 5 && samples_right >= 5);
+  assert(close(coordinated_ready_target(0.75, 2.0, true), 0.75));
+  assert(close(coordinated_ready_target(0.75, 2.0, false), 2.0));
+
+  // On entering MIMO TRACK, a measured right-wheel overspeed must produce
+  // a BRAKING (positive) right-wheel current instead of the old -2 A.
+  const Vec2 recorded_ref_wheels{{2.7656, -2.7656}};
+  const Vec2 recorded_meas_wheels{{-5.5816, -24.5882}};
+  const auto recorded_ref = model.wheel_to_body(recorded_ref_wheels);
+  const auto recorded_meas = model.wheel_to_body(recorded_meas_wheels);
+  Ladrc recovered_track;
+  recovered_track.reset_to_measurement(recorded_meas);
+  const auto brake = recovered_track.step(
+    model, recorded_ref, recorded_meas, {{0.0, 0.0}}, 0.005,
+    {{5.0, 5.0}}, {{20.0, 20.0}});
+  assert(brake[0] > 0.0);
+  assert(brake[1] > 0.0); // right wheel must decelerate its negative rotation
 
   std::cout << "MIMO model/LADRC/PID checks passed\n";
 }
