@@ -59,6 +59,53 @@ def inspect(rows, wheel="left"):
     }
 
 
+def inspect_before_reversal(rows, wheel="left"):
+    """Describe a partial forward run without claiming a current reversal."""
+    if any(r.get("event") == "reverse_command" for r in rows):
+        raise ValueError("This function is for logs without reverse_command")
+    start = next((r for r in rows if r.get("event") == "forward_start"), None)
+    if start is None:
+        raise ValueError("No forward_start or reverse_command event; invalid test log")
+    t0 = val(start, "elapsed_s")
+    if t0 is None:
+        raise ValueError("forward_start event lacks elapsed_s")
+    speeds = sorted(
+        ((val(r, "elapsed_s"), val(r, f"{wheel}_rpm"))
+         for r in rows if r.get("event") == "velocity_rx"),
+        key=lambda pair: (pair[0] is None, pair[0] if pair[0] is not None else 0)
+    )
+    speeds = [(t, speed) for t, speed in speeds
+              if t is not None and speed is not None and t >= t0]
+    currents = [
+        (val(r, "elapsed_s"), val(r, f"actual_{wheel}_A"))
+        for r in rows if r.get("event") == "current_rx"
+    ]
+    currents = [(t, current) for t, current in currents
+                if t is not None and current is not None and t >= t0]
+    if not speeds:
+        raise ValueError("No fresh speed feedback after forward_start")
+    max_t, max_rpm = max(speeds, key=lambda item: item[1])
+    thresholds = {
+        rpm: next((t-t0 for t, speed in speeds if speed >= rpm), None)
+        for rpm in (45, 100, 200, 300, 350, 370)
+    }
+    last_t, last_speed = speeds[-1]
+    return {
+        "duration_s": last_t-t0,
+        "max_speed_rpm": max_rpm,
+        "max_speed_time_s": max_t-t0,
+        "last_speed_rpm": last_speed,
+        "thresholds": thresholds,
+        "current_min_A": min((i for _, i in currents), default=None),
+        "current_max_A": max((i for _, i in currents), default=None),
+        "current_mean_A": (
+            sum(i for _, i in currents)/len(currents) if currents else None
+        ),
+        "n_current": len(currents),
+        "n_speed": len(speeds),
+    }
+
+
 def fmt(value):
     return "NOT OBSERVED" if value is None else f"{value:+.4f}"
 
@@ -70,7 +117,32 @@ def main(argv=None):
     args = p.parse_args(argv)
     try:
         with Path(args.csv_file).expanduser().open(newline="", encoding="utf-8") as f:
-            result = inspect(list(csv.DictReader(f)), args.wheel)
+            rows = list(csv.DictReader(f))
+        if not any(r.get("event") == "reverse_command" for r in rows):
+            pre = inspect_before_reversal(rows, args.wheel)
+            print(f"File: {args.csv_file}; wheel={args.wheel}")
+            print("NO REVERSE COMMAND recorded: 5-second hold did not complete "
+                  "(or the log is incomplete). Do not infer braking behavior.")
+            print(f"Last fresh speed feedback t={pre['duration_s']:.4f}s "
+                  f"speed={pre['last_speed_rpm']:+.1f} rpm")
+            print(f"Maximum observed speed={pre['max_speed_rpm']:.1f} rpm "
+                  f"at t={pre['max_speed_time_s']:.4f}s")
+            for rpm, t in pre["thresholds"].items():
+                print(f"First reported >= {rpm} rpm: "
+                      + ("not observed" if t is None else f"t={t:.4f}s"))
+            if pre['n_current']:
+                print(f"6077h current min/mean/max = "
+                      f"{pre['current_min_A']:+.3f}/"
+                      f"{pre['current_mean_A']:+.3f}/"
+                      f"{pre['current_max_A']:+.3f} A")
+            else:
+                print("No post-start fresh 6077h feedback")
+            print(f"Fresh TPDO samples: speed={pre['n_speed']}, "
+                  f"current={pre['n_current']}")
+            print("Safety: do not disable overspeed protection or raise cutoff "
+                  "to force 5-second hold.")
+            return 0
+        result = inspect(rows, args.wheel)
     except (OSError, ValueError) as exc:
         p.error(str(exc))
     print(f"File: {args.csv_file}; wheel={args.wheel}")
