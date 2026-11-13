@@ -743,7 +743,9 @@ hardware_interface::return_type Zlac8015dSystemHardware::write(
                     << ",v_m_s,omega_rad_s"
                     << ",hat_v_m_s,hat_omega_rad_s"
                     << ",hat_d_v_m_s2,hat_d_omega_rad_s2"
-                    << ",mimo_pid_integral_v,mimo_pid_integral_omega";
+                    << ",mimo_pid_integral_v,mimo_pid_integral_omega"
+                    << ",mimo_pid_d_v_m_s2,mimo_pid_d_omega_rad_s2"
+                    << ",mimo_pid_d_updated,mimo_pid_d_dt_s";
           }
           csv_log << '\n';
 
@@ -801,7 +803,11 @@ hardware_interface::return_type Zlac8015dSystemHardware::write(
                   << "," << est[0] << "," << est[1]
                   << "," << disturbance[0] << "," << disturbance[1]
                   << "," << mimo_pid_.integral_error[0]
-                  << "," << mimo_pid_.integral_error[1];
+                  << "," << mimo_pid_.integral_error[1]
+                  << "," << mimo_pid_.filtered_derivative[0]
+                  << "," << mimo_pid_.filtered_derivative[1]
+                  << "," << static_cast<int>(mimo_pid_.derivative_updated)
+                  << "," << mimo_pid_.derivative_sample_dt_s;
         }
         csv_log << '\n';
 
