@@ -71,7 +71,7 @@ def make_plots(rows, output_prefix):
         if graph == "current":
             for wheel in ("left", "right"):
                 cmd = [(number(row, "elapsed_s"), number(row, f"command_{wheel}_A"))
-                       for row in rows if row["event"] == "step_change"]
+                       for row in rows if row["event"] in ("step_change", "complete_zero")]
                 cmd = [(t, v) for t,v in cmd if t is not None and v is not None]
                 actual = [(number(row, "elapsed_s"), number(row, f"actual_{wheel}_A"))
                           for row in rows if row["event"] == "current_rx"]
