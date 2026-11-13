@@ -93,7 +93,9 @@ def extract(path, *, window=0.14, wheel="left", bin_s=0.02):
     nums = [c for _, c in currents]
     points = [(t, rpm * 2 * math.pi / 60.0) for t, rpm in speeds]
     bins = []
-    for k in range(math.ceil(window / bin_s)):
+    # Floating-point division may yield 7.000000000000001 for 0.14/0.02.
+    # Avoid a fictitious zero-width terminal bin (0.140-0.140 s).
+    for k in range(math.ceil(window / bin_s - 1e-9)):
         lo = k * bin_s
         hi = min(window, (k + 1) * bin_s)
         cs = [c for t, c in currents if lo <= t < hi]
@@ -126,6 +128,10 @@ def fmt(value, digits=3):
     return "n/a" if value is None else f"{value:.{digits}f}"
 
 
+def fmt_time(value):
+    return "n/a" if value is None else f"{value:.3f}s"
+
+
 def print_report(reports):
     print("Read-only comparison; only independent event=current_rx / velocity_rx.")
     print("All means/accel fit are for the SAME post-step window; not steady state.")
@@ -141,8 +147,8 @@ def print_report(reports):
               f"range={fmt(r['min_A'])}..{fmt(r['max_A'])} A")
         print(f"Wheel max |rpm|={fmt(r['max_rpm'], 1)}, "
               f"acceleration OLS={fmt(r['accel_rad_s2'])} rad/s²")
-        print(f"Cross 10rpm at t={fmt(r['reach10_s'])}s; "
-              f"cross 30rpm at t={fmt(r['reach30_s'])}s")
+        print(f"Cross 10rpm at t={fmt_time(r['reach10_s'])}; "
+              f"cross 30rpm at t={fmt_time(r['reach30_s'])}")
         print(f"Start row held rpm={fmt(r['start_held_rpm'])}; "
               f"documented stable preflight={'YES' if r['preflight'] else 'NO (legacy CSV)'}")
         print("  time(s)      mean 6077h(A)  mean rpm   Ncurrent/Nspeed")
