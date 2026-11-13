@@ -35,6 +35,9 @@ def classify(row, limit, min_v, min_omega, wheel_err):
     if any(x is None for x in a.values()):
         return None
     a["time_s"] = val(row, "time_s")
+    # Optional ESO values from current MIMO-LADRC runtime logger.
+    a["hat_omega_rad_s"] = val(row, "hat_omega_rad_s")
+    a["hat_d_omega_rad_s2"] = val(row, "hat_d_omega_rad_s2")
     if a["time_s"] is None:
         return None
     composite = abs(a["ref_v_m_s"]) >= min_v and abs(a["ref_omega_rad_s"]) >= min_omega
@@ -105,6 +108,9 @@ def bins(rows, start, end, step):
         if not subset:
             continue
         mean=lambda k: statistics.mean(r[k] for r in subset)
+        def mean_optional(key):
+            xs = [r[key] for r in subset if r.get(key) is not None]
+            return statistics.mean(xs) if xs else ""
         rate=lambda key: 100*sum(bool(r[key]) for r in subset)/len(subset)
         yield {
             "t_start_s": round(a, 3), "t_end_s": round(b, 3), "samples": len(subset),
@@ -117,6 +123,8 @@ def bins(rows, start, end, step):
             "cmd_r": mean("cmd_current_right_A"),
             "actual_r": mean("actual_current_right_A"),
             "yaw_error": mean("yaw_error_rad_s"),
+            "hat_omega": mean_optional("hat_omega_rad_s"),
+            "hat_d_omega": mean_optional("hat_d_omega_rad_s2"),
             "diff_cmd_a": mean("diff_cmd_a"), "diff_actual_a": mean("diff_actual_a"),
             "yaw_wrong_pct": rate("yaw_wrong_sign"),
             "sat_pct": rate("saturated"), "track_pct": rate("both_track"),
@@ -178,7 +186,7 @@ def main(argv=None):
     print(f"\nFocus {args.start:.2f}-{args.end:.2f}s; "
           f"per-bin means and percent of samples within each bin")
     print("Time[s]    v_ref/v    omega_ref/omega    left Icmd/Iact    right Icmd/Iact  "
-          "dIcmd/dIact YawErr  SAT% TRACK% OVR% DRV% BRK% YAWbad%")
+          "dIcmd/dIact YawErr HatOmega HatDomega SAT% TRACK% OVR% DRV% BRK% YAWbad%")
     for b in focus:
         print(f"{b['t_start_s']:6.2f} "
               f"{b['ref_v']:5.2f}/{b['v']:5.2f} "
@@ -187,6 +195,10 @@ def main(argv=None):
               f"{b['cmd_r']:+6.2f}/{b['actual_r']:+6.2f} "
               f"{b['diff_cmd_a']:+5.2f}/{b['diff_actual_a']:+5.2f} "
               f"{b['yaw_error']:+6.2f} "
+              f"{b['hat_omega']:+7.2f} " if isinstance(b['hat_omega'], float) else
+              f"{b['yaw_error']:+6.2f}     --  "
+              f"{b['hat_d_omega']:+8.2f} " if isinstance(b['hat_d_omega'], float) else
+              f"    --    "
               f"{b['sat_pct']:5.0f} {b['track_pct']:6.0f} "
               f"{b['overspeed_pct']:4.0f} {b['drive_overspeed_pct']:4.0f} "
               f"{b['brake_overspeed_pct']:4.0f} {b['yaw_wrong_pct']:7.0f}")
