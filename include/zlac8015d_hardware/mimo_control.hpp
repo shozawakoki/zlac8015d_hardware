@@ -9,6 +9,7 @@
 #include <array>
 #include <algorithm>
 #include <cstddef>
+#include <chrono>
 #include <cmath>
 #include <stdexcept>
 
@@ -126,6 +127,7 @@ public:
   Vec2 integral_error{{0.0, 0.0}};
   Vec2 filtered_derivative{{0.0, 0.0}};
   Vec2 previous_measured{{0.0, 0.0}};
+  std::chrono::steady_clock::time_point previous_sample_time{};
   bool initialized{false};
 
   void reset()
@@ -133,6 +135,7 @@ public:
     integral_error = {{0.0, 0.0}};
     filtered_derivative = {{0.0, 0.0}};
     previous_measured = {{0.0, 0.0}};
+    previous_sample_time = {};
     initialized = false;
   }
 
@@ -141,20 +144,58 @@ public:
     const Vec2 & measured, const double dt, const Vec2 & kp,
     const Vec2 & ki, const Vec2 & kd, const double derivative_tau,
     const double current_limit, const Vec2 & acceleration_feedforward = {{0.0, 0.0}},
-    const bool enable_integral = true)
+    const bool enable_integral = true,
+    const std::chrono::steady_clock::time_point velocity_sample_time = {})
   {
+    // P and I continue to run at the controller rate (nominally 200 Hz).
+    // D changes only when a *new TPDO0 velocity measurement* was received.
+    // velocity_sample_time is updated by read() on every valid TPDO0 frame
+    // and stays unchanged during controller cycles without a new frame.
     if (!initialized) {
       previous_measured = measured;
+      previous_sample_time = velocity_sample_time;
       initialized = true;
     }
-    const double alpha = dt / (derivative_tau + dt);
+
+    if (velocity_sample_time != previous_sample_time &&
+        velocity_sample_time != std::chrono::steady_clock::time_point{})
+    {
+      const double sample_dt = std::chrono::duration<double>(
+        velocity_sample_time - previous_sample_time).count();
+
+      // Reject non-monotonic and near-simultaneous read timestamps to avoid
+      // extreme numerical derivatives from a buffered/bursty CAN stream.
+      // Do not advance the derivative baseline for these rejected frames,
+      // so a subsequent valid sample measures the accumulated interval.
+      constexpr double MIN_SAMPLE_DT_S = 0.001;
+      constexpr double MAX_SAMPLE_DT_S = 0.100;
+      if (std::isfinite(sample_dt) &&
+          sample_dt >= MIN_SAMPLE_DT_S && sample_dt <= MAX_SAMPLE_DT_S)
+      {
+        const double alpha = sample_dt / (derivative_tau + sample_dt);
+        for (std::size_t i = 0; i < 2; ++i) {
+          const double derivative =
+            (measured[i] - previous_measured[i]) / sample_dt;
+          filtered_derivative[i] += alpha *
+            (derivative - filtered_derivative[i]);
+        }
+        previous_measured = measured;
+        previous_sample_time = velocity_sample_time;
+      } else if (!std::isfinite(sample_dt) || sample_dt < 0.0 ||
+                 sample_dt > MAX_SAMPLE_DT_S)
+      {
+        // Following a long gap or a clock discontinuity, do not form
+        // a derivative across the gap; restart from the new sample.
+        filtered_derivative = {{0.0, 0.0}};
+        previous_measured = measured;
+        previous_sample_time = velocity_sample_time;
+      }
+    }
+
     Vec2 error{};
     for (std::size_t i = 0; i < 2; ++i) {
       error[i] = reference[i] - measured[i];
-      const double derivative = (measured[i] - previous_measured[i]) / dt;
-      filtered_derivative[i] += alpha * (derivative - filtered_derivative[i]);
     }
-    previous_measured = measured;
     const auto calculate = [&](const Vec2 & integ) -> Vec2 {
       Vec2 virtual_acceleration{};
       for (std::size_t i = 0; i < 2; ++i) {
