@@ -692,6 +692,10 @@ hardware_interface::return_type Zlac8015dSystemHardware::write(
     return hardware_interface::return_type::OK;
   }
 
+  const bool mimo_mode =
+    control_mode_ == ControlMode::MIMO_LADRC_TORQUE ||
+    control_mode_ == ControlMode::MIMO_PID_TORQUE;
+
   // ==========================================================
   // 200 Hz LADRC/PID runtime CSV logger
   //
@@ -708,6 +712,10 @@ hardware_interface::return_type Zlac8015dSystemHardware::write(
 
       if (!csv_initialized) {
         const char * log_path =
+          control_mode_ == ControlMode::MIMO_PID_TORQUE ?
+            "/tmp/mimo_pid_track_200hz.csv" :
+          control_mode_ == ControlMode::MIMO_LADRC_TORQUE ?
+            "/tmp/mimo_ladrc_track_200hz.csv" :
           control_mode_ == ControlMode::PID_TORQUE ?
             "/tmp/pid_track_200hz.csv" : "/tmp/ladrc_track_200hz.csv";
         csv_log.open(log_path, std::ios::out | std::ios::trunc);
@@ -729,6 +737,13 @@ hardware_interface::return_type Zlac8015dSystemHardware::write(
             csv_log
               << ",pid_integral_left_A,pid_integral_right_A"
               << ",pid_dvel_left_rad_s2,pid_dvel_right_rad_s2";
+          }
+          if (mimo_mode) {
+            csv_log << ",ref_v_m_s,ref_omega_rad_s"
+                    << ",v_m_s,omega_rad_s"
+                    << ",hat_v_m_s,hat_omega_rad_s"
+                    << ",hat_d_v_m_s2,hat_d_omega_rad_s2"
+                    << ",mimo_pid_integral_v,mimo_pid_integral_omega";
           }
           csv_log << '\n';
 
@@ -773,6 +788,20 @@ hardware_interface::return_type Zlac8015dSystemHardware::write(
             << "," << right_pid_.integral_current
             << "," << left_pid_.filtered_velocity_derivative
             << "," << right_pid_.filtered_velocity_derivative;
+        }
+        if (mimo_mode) {
+          const auto ref_body = mimo_model_.wheel_to_body(
+            {{hw_commands_[0], hw_commands_[1]}});
+          const auto measured_body = mimo_model_.wheel_to_body(
+            {{hw_velocities_[0], hw_velocities_[1]}});
+          const auto & est = mimo_ladrc_.z1;
+          const auto & disturbance = mimo_ladrc_.z2;
+          csv_log << "," << ref_body[0] << "," << ref_body[1]
+                  << "," << measured_body[0] << "," << measured_body[1]
+                  << "," << est[0] << "," << est[1]
+                  << "," << disturbance[0] << "," << disturbance[1]
+                  << "," << mimo_pid_.integral_error[0]
+                  << "," << mimo_pid_.integral_error[1];
         }
         csv_log << '\n';
 
