@@ -89,8 +89,16 @@ def main():
             name = f"0x{index:04X}:{sub:02X}"
             if status == "value":
                 extra = ""
-                if index == 0x6041:
-                    extra = f" => {decode_statusword(value)}"
+                if index == 0x6041 and sub == 0:
+                    # ZLAC8015D 6041:00 is U32: two independently reported
+                    # 16-bit motor statuswords packed together.
+                    low = value & 0xFFFF
+                    high = (value >> 16) & 0xFFFF
+                    extra = (f" => lower16=0x{low:04X} [{decode_statusword(low)}]; "
+                             f"upper16=0x{high:04X} [{decode_statusword(high)}]")
+                    if ((low & 0x006F) != 0x0027 or
+                            (high & 0x006F) != 0x0027):
+                        extra += " [NOT BOTH OPERATION ENABLED]"
                 elif index == 0x6061:
                     extra = f" => {'Profile Torque' if value == 4 else 'NOT Profile Torque'}"
                 elif index == 0x603F and value:
