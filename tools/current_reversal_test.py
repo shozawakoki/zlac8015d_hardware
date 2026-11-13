@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Speed-triggered current sign reversal on ZLAC8015D, with conservative guards.
+"""Current sign reversal on ZLAC8015D (speed-triggered OR timed), with guards.
 
-Purpose: +I until a measured forward RPM threshold, immediately command -I;
+Purpose: +I until a measured forward RPM threshold or a fixed time, then -I;
 observe braking, zero-speed crossing, and confirmed negative RPM. Stop at -RPM.
 PREVIEW ONLY by default. Live use requires explicit --execute and safety flags.
 
@@ -35,7 +35,12 @@ def parse_args(argv=None):
     p.add_argument("--current-a", type=float, default=1.0,
                    help="magnitude of both +I and -I (default 1.0 A)")
     p.add_argument("--switch-rpm", type=float, default=15.0,
-                   help="switch to negative current upon fresh forward RPM >= this value")
+                   help="speed-trigger mode: reverse at measured forward RPM >= threshold")
+    p.add_argument("--switch-after-s", type=float, default=None,
+                   help="time-trigger mode: reverse current at this many seconds (max 5.0), "
+                        "only if still rotating forward; overrides --switch-rpm")
+    p.add_argument("--min-switch-rpm", type=float, default=5.0,
+                   help="time-trigger mode: refuse reversal if selected wheel is slower than this")
     p.add_argument("--reverse-confirm-rpm", type=float, default=3.0,
                    help="stop after two fresh feedback frames <= -this value")
     p.add_argument("--max-speed-rpm", type=float, default=45.0,
@@ -63,6 +68,7 @@ def parse_args(argv=None):
 
 def preflight(args):
     values = (args.current_a, args.switch_rpm, args.reverse_confirm_rpm,
+              args.min_switch_rpm, args.switch_after_s if args.switch_after_s is not None else 0.0,
               args.max_speed_rpm, args.max_forward_s, args.max_reverse_s,
               args.loop_hz, args.feedback_timeout_ms, args.settle_seconds,
               args.settle_timeout_seconds, args.settle_max_rpm,
@@ -76,6 +82,10 @@ def preflight(args):
         raise ValueError("current magnitude must be within (0, 1.0] A")
     if not (5.0 <= args.switch_rpm <= 25.0):
         raise ValueError("switch-rpm must be 5..25 rpm")
+    if args.switch_after_s is not None and not (0.05 <= args.switch_after_s <= 5.0):
+        raise ValueError("switch-after-s must be within 0.05..5.0 seconds")
+    if not (0.5 <= args.min_switch_rpm <= 20.0):
+        raise ValueError("min-switch-rpm must be within 0.5..20.0 rpm")
     if not (1.0 <= args.reverse_confirm_rpm <= 5.0):
         raise ValueError("reverse-confirm-rpm must be 1..5 rpm")
     if not (args.switch_rpm + 10.0 <= args.max_speed_rpm <= 60.0):
@@ -91,13 +101,18 @@ def preflight(args):
             not 0.0 < args.settle_max_rpm <= 2.0 or
             not 0.0 <= args.settle_max_current_a <= 0.3):
         raise ValueError("invalid zero-current settling limits")
-    print("Speed-triggered TORQUE/CURRENT reversal (NOT speed command):")
-    print(f"  wheel={args.wheel}, +{args.current_a:.2f} A until +{args.switch_rpm:.1f} rpm")
+    print("TORQUE/CURRENT reversal (NOT speed command):")
+    if args.switch_after_s is None:
+        print(f"  wheel={args.wheel}, +{args.current_a:.2f} A until +{args.switch_rpm:.1f} rpm")
+    else:
+        print(f"  wheel={args.wheel}, +{args.current_a:.2f} A for {args.switch_after_s:.2f}s")
+        print(f"  at switch time, requires wheel speed >=+{args.min_switch_rpm:.1f} rpm")
     print(f"  then -{args.current_a:.2f} A until two consecutive fresh readings "
           f"at <=-{args.reverse_confirm_rpm:.1f} rpm")
     print(f"  upper cutoff ±{args.max_speed_rpm:.1f} rpm on EITHER wheel, "
-          f"forward timeout={args.max_forward_s:.2f}s, "
-          f"reverse timeout={args.max_reverse_s:.2f}s")
+          + (f"forward timeout={args.max_forward_s:.2f}s, " if args.switch_after_s is None else
+             f"timed hold={args.switch_after_s:.2f}s, ")
+          + f"reverse timeout={args.max_reverse_s:.2f}s")
     print("  Current/velocity TPDO at driver sign-converted ROS-positive coordinates.")
     print("  WARNING: may overspeed or abort before reverse; confirm physical safety.")
     if not args.execute:
@@ -125,6 +140,16 @@ def selected_rpm(tester, wheel):
     return tester.rpm_l if wheel == "left" else tester.rpm_r
 
 
+def switch_to_braking(tester, args, start, rpm, when):
+    tester.stage = 1
+    tester.step_started = when
+    tester.step_current = -args.current_a
+    tester.command(-args.current_a)
+    tester.log("reverse_command", when=when)
+    print(f"t={when-start:.4f}s: +{rpm:.1f} rpm; commanded "
+          f"-{args.current_a:.2f} A", flush=True)
+
+
 def run_reversal(tester, args):
     tester.wait_feedback()
     tester.wait_for_stable_zero()
@@ -148,8 +173,22 @@ def run_reversal(tester, args):
     while True:
         now = time.monotonic()
         tester.check_safety(now)
-        if phase == "forward" and now - start > args.max_forward_s:
-            raise RuntimeError("No forward RPM trigger before timeout")
+        if phase == "forward":
+            if args.switch_after_s is None:
+                if now - start > args.max_forward_s:
+                    raise RuntimeError("No forward RPM trigger before timeout")
+            elif now - start >= args.switch_after_s:
+                rpm = selected_rpm(tester, args.wheel)
+                other_rpm = tester.rpm_r if args.wheel == "left" else tester.rpm_l
+                if abs(other_rpm) > 5.0:
+                    raise RuntimeError("Uncommanded other wheel rotation at timed switch")
+                if rpm < args.min_switch_rpm:
+                    raise RuntimeError(
+                        f"Refusing timed reversal: wheel speed={rpm:+.1f} rpm "
+                        f"is below +{args.min_switch_rpm:.1f} rpm")
+                phase = "braking"
+                reverse_at = time.monotonic()
+                switch_to_braking(tester, args, start, rpm, reverse_at)
         if phase == "braking" and now - reverse_at > args.max_reverse_s:
             raise RuntimeError("Reverse not confirmed before timeout")
         if now >= next_tx:
@@ -172,15 +211,10 @@ def run_reversal(tester, args):
         if phase == "forward":
             if rpm < -args.settle_max_rpm:
                 raise RuntimeError("Wheel rotating opposite to requested forward torque")
-            if rpm >= args.switch_rpm:
+            if args.switch_after_s is None and rpm >= args.switch_rpm:
                 phase = "braking"
                 reverse_at = time.monotonic()
-                tester.step_started = reverse_at
-                tester.step_current = -args.current_a
-                tester.command(-args.current_a)
-                tester.log("reverse_command", when=reverse_at)
-                print(f"t={reverse_at-start:.4f}s: "
-                      f"+{rpm:.1f} rpm reached; commanded -{args.current_a:.2f} A", flush=True)
+                switch_to_braking(tester, args, start, rpm, reverse_at)
         else:
             if rpm <= 0.0 and not zero_logged:
                 zero_logged = True
