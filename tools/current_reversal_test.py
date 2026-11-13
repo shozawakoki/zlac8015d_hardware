@@ -48,7 +48,12 @@ def parse_args(argv=None):
                         "--verified-safe-rpm")
     p.add_argument("--verified-safe-rpm", type=float, default=None,
                    help="documented maximum safe speed of the ACTUAL motor/drive/fixture; "
-                        "required for any cutoff above 60 rpm")
+                        "required for any active cutoff above 60 rpm")
+    p.add_argument("--disable-speed-abort", action="store_true",
+                   help="explicitly disable SOFTWARE overspeed abort during fixed-time reversal; "
+                        "feedback/current/timeouts remain active")
+    p.add_argument("--confirm-hardware-speed-limiting", action="store_true",
+                   help="I independently verified hardware speed limiting under torque mode")
     p.add_argument("--max-forward-s", type=float, default=0.25,
                    help="abort if no forward RPM trigger within this period")
     p.add_argument("--max-reverse-s", type=float, default=None,
@@ -101,12 +106,14 @@ def preflight(args):
         raise ValueError("speed cutoff must exceed switch-rpm by >=10 rpm and be <=370 rpm")
     if args.verified_safe_rpm is not None and not (20.0 <= args.verified_safe_rpm <= 3000.0):
         raise ValueError("verified-safe-rpm must be a verified 20..3000 rpm rating")
-    if args.max_speed_rpm > 60.0 and (
+    if args.max_speed_rpm > 60.0 and not args.disable_speed_abort and (
             args.verified_safe_rpm is None or
             args.max_speed_rpm > args.verified_safe_rpm):
         raise ValueError(
             "cutoffs above 60 rpm require --verified-safe-rpm >= --max-speed-rpm; "
             "confirm documented motor/drive/fixture maximum before running")
+    if args.disable_speed_abort and args.switch_after_s != 5.0:
+        raise ValueError("--disable-speed-abort is only supported for --switch-after-s 5.0")
     reverse_timeout_cap = 2.0 if args.switch_after_s is not None else 0.8
     if not (0.05 <= args.max_forward_s <= 0.5 and
             0.1 <= args.max_reverse_s <= reverse_timeout_cap):
@@ -129,9 +136,13 @@ def preflight(args):
         print(f"  at switch time, requires wheel speed >=+{args.min_switch_rpm:.1f} rpm")
     print(f"  then -{args.current_a:.2f} A until two consecutive fresh readings "
           f"at <=-{args.reverse_confirm_rpm:.1f} rpm")
-    print(f"  upper cutoff ±{args.max_speed_rpm:.1f} rpm on EITHER wheel, "
-          + (f"forward timeout={args.max_forward_s:.2f}s, " if args.switch_after_s is None else
-             f"timed hold={args.switch_after_s:.2f}s, ")
+    if args.disable_speed_abort:
+        print("  SOFTWARE SPEED ABORT DISABLED; actual rpm still logged and checked "
+              "for forward rotation/reverse crossing.")
+    else:
+        print(f"  upper cutoff ±{args.max_speed_rpm:.1f} rpm on EITHER wheel")
+    print((f"  forward timeout={args.max_forward_s:.2f}s, " if args.switch_after_s is None else
+           f"  timed hold={args.switch_after_s:.2f}s, ")
           + f"reverse timeout={args.max_reverse_s:.2f}s")
     print("  Current/velocity TPDO at driver sign-converted ROS-positive coordinates.")
     if args.verified_safe_rpm is not None:
@@ -144,6 +155,9 @@ def preflight(args):
                 "confirm_exclusive_can", "confirm_regeneration_safe"):
         if not getattr(args, key):
             raise ValueError(f"live test requires --{key.replace('_','-')}")
+    if args.disable_speed_abort and not args.confirm_hardware_speed_limiting:
+        raise ValueError(
+            "disabling software RPM abort requires --confirm-hardware-speed-limiting")
     # Advisory process check; not a CAN bus ownership lock.
     ps = subprocess.run(["ps", "-eo", "pid=,args="],
                         capture_output=True, text=True, check=True)
@@ -181,7 +195,14 @@ def check_configured_drive_speed(tester, args):
     configured_rpm = tester.sdo_read(0x2008, 0, timeout_s=0.15)
     if not 1 <= configured_rpm <= 1000:
         raise RuntimeError(f"Invalid 2008h motor max working speed: {configured_rpm}")
-    if args.max_speed_rpm > configured_rpm:
+    if args.disable_speed_abort:
+        if configured_rpm != 370:
+            raise RuntimeError(
+                f"Software RPM abort disabled, but 2008h={configured_rpm} rpm "
+                "does not match previously verified 370 rpm configuration")
+        print("Preflight: software RPM abort disabled by explicit operator request; "
+              "other safety guards remain active", flush=True)
+    elif args.max_speed_rpm > configured_rpm:
         raise RuntimeError(
             f"Software speed cutoff {args.max_speed_rpm:g} rpm exceeds drive's "
             f"2008h configuration {configured_rpm} rpm; no nonzero current sent")
