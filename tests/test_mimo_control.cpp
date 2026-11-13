@@ -1,5 +1,6 @@
-// Standalone tests: g++ -std=c++17 -Wall -Wextra -pedantic -Iinclude \
-//   tests/test_mimo_control.cpp -o /tmp/test_mimo_control && /tmp/test_mimo_control
+// Standalone MIMO tests (from the package root).
+// Build: g++ -std=c++17 -Wall -Wextra -pedantic -Iinclude tests/test_mimo_control.cpp -o /tmp/test_mimo_control
+// Run:   /tmp/test_mimo_control
 #include "zlac8015d_hardware/mimo_control.hpp"
 #include <cassert>
 #include <cmath>
@@ -62,5 +63,58 @@ int main()
     {{0.7,1.4}},{{0.0,0.0}},{{0.0,0.0}},0.05,8.0);
   assert(pid_stronger[0]>pid_current[0]);
   assert(pid_stronger[1]<pid_current[1]);
+  // The D term must use only NEW TPDO0 samples and their actual receive
+  // time difference, not the 200 Hz controller dt. P/I remain on the 200 Hz loop.
+  using Clock = std::chrono::steady_clock;
+  using Ms = std::chrono::milliseconds;
+  const Clock::time_point t0 = Clock::time_point{} + Ms(1000);
+  const Vec2 zero{{0.0, 0.0}};
+  const Vec2 d_gain{{1.0, 1.0}};
+  Pid sampled_pid;
+  (void)sampled_pid.step(
+    model, zero, zero, 0.005, zero, zero, d_gain, 0.05, 8.0,
+    zero, true, t0);
+  assert(close(sampled_pid.filtered_derivative[0], 0.0));
+  const Vec2 first_sample{{0.010, 0.020}};
+  // A 200 Hz controller tick without a CAN sample must not update D.
+  (void)sampled_pid.step(
+    model, zero, zero, 0.005, zero, zero, d_gain, 0.05, 8.0,
+    zero, true, t0);
+  assert(close(sampled_pid.filtered_derivative[0], 0.0));
+  // Fresh CAN measurement arrives 10 ms after the first measurement:
+  // derivative=[1,2], filtered with alpha=10/(50+10)=1/6.
+  (void)sampled_pid.step(
+    model, zero, first_sample, 0.005, zero, zero, d_gain, 0.05, 8.0,
+    zero, true, t0 + Ms(10));
+  assert(close(sampled_pid.filtered_derivative[0], 1.0 / 6.0));
+  assert(close(sampled_pid.filtered_derivative[1], 2.0 / 6.0));
+  // A repeated controller step with the same TPDO0 timestamp holds D.
+  (void)sampled_pid.step(
+    model, zero, first_sample, 0.005, zero, zero, d_gain, 0.05, 8.0,
+    zero, true, t0 + Ms(10));
+  assert(close(sampled_pid.filtered_derivative[0], 1.0 / 6.0));
+  // A new TPDO0 frame with identical speed is still a new sample:
+  // D input is zero, the low-pass derivative decays.
+  (void)sampled_pid.step(
+    model, zero, first_sample, 0.005, zero, zero, d_gain, 0.05, 8.0,
+    zero, true, t0 + Ms(20));
+  assert(close(sampled_pid.filtered_derivative[0], 5.0 / 36.0));
+  assert(close(sampled_pid.filtered_derivative[1], 10.0 / 36.0));
+  // Bursts less than 1 ms apart are rejected, preserving the baseline.
+  const Vec2 burst_sample{{0.050, 0.050}};
+  (void)sampled_pid.step(
+    model, zero, burst_sample, 0.005, zero, zero, d_gain, 0.05, 8.0,
+    zero, true, t0 + Ms(20) + std::chrono::microseconds(100));
+  assert(close(sampled_pid.filtered_derivative[0], 5.0 / 36.0));
+  // After a long gap, the derivative resets instead of a large D kick.
+  (void)sampled_pid.step(
+    model, zero, burst_sample, 0.005, zero, zero, d_gain, 0.05, 8.0,
+    zero, true, t0 + Ms(300));
+  assert(close(sampled_pid.filtered_derivative[0], 0.0));
+  assert(close(sampled_pid.filtered_derivative[1], 0.0));
+  sampled_pid.reset();
+  assert(!sampled_pid.initialized);
+  assert(close(sampled_pid.filtered_derivative[0], 0.0));
+
   std::cout << "MIMO model/LADRC/PID checks passed\n";
 }
