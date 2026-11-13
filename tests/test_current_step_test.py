@@ -102,11 +102,20 @@ class CurrentStepTest(unittest.TestCase):
             self.tester.setup()
         self.tester.command.assert_called_with(0.0)
 
+    def test_reject_one_motor_not_enabled(self):
+        self.tester.configure_feedback = Mock()
+        self.tester.sdo = Mock()
+        self.tester.command = Mock()
+        # Lower16 enabled, upper16 merely ready to switch on.
+        self.tester.sdo_read = Mock(side_effect=[0x00210027, 4])
+        with self.assertRaisesRegex(RuntimeError, "Both motors"):
+            self.tester.setup()
+
     def test_reject_wrong_mode_display(self):
         self.tester.configure_feedback = Mock()
         self.tester.sdo = Mock()
         self.tester.command = Mock()
-        self.tester.sdo_read = Mock(side_effect=[0x0027, 3])
+        self.tester.sdo_read = Mock(side_effect=[0x00270027, 3])
         with self.assertRaisesRegex(RuntimeError, "not Profile Torque"):
             self.tester.setup()
 
