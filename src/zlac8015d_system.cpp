@@ -1536,8 +1536,8 @@ double Zlac8015dSystemHardware::compute_current_command(
       (!allow_track_transition &&
        state.start_count >= COORDINATED_READY_SAMPLES);
 
-    // During coordinated READY, use READY_WAIT_A as a minimum current.
-    // If a larger current was required to reach READY, keep that value.
+    // Legacy coordinated startup uses READY_WAIT_A as a minimum;
+    // MIMO startup preserves the current level of the already-moving wheel.
     if (coordinated_ready) {
       state.breakaway_target = mimo::coordinated_ready_target(
         state.breakaway_target, READY_WAIT_A, mimo_torque_mode);
