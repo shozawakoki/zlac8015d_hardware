@@ -166,5 +166,65 @@ class ReversalTests(unittest.TestCase):
                 rev.run_reversal(tester, args)
 
 
+    def test_timed_five_second_hold_then_reverse(self):
+        args = self.parse("--switch-after-s", "5.0")
+        clock = Clock()
+
+        class TimedTester(FakeSequenceTester):
+            def __init__(self, *v):
+                super().__init__(*v)
+                self.reverse_time = None
+                self.braking_samples = iter([12.0, 7.0, 3.0, 0.0,
+                                             -1.0, -3.1, -3.2])
+
+            def command(self, amp):
+                super().command(amp)
+                if amp < 0 and self.reverse_time is None:
+                    self.reverse_time = self.clock.now()
+
+            def receive(self, timeout):
+                self.clock.t += 0.005
+                if self.reverse_time is None:
+                    self.rpm_l = 12.0
+                else:
+                    self.rpm_l = next(self.braking_samples, -3.2)
+                return (0x181, b"\0" * 8, self.clock.now())
+
+        tester = TimedTester(clock, [])
+        with patch.object(rev.time, "monotonic", clock.now):
+            rev.run_reversal(tester, args)
+        self.assertIsNotNone(tester.reverse_time)
+        self.assertGreaterEqual(tester.reverse_time - 10.0, 5.0)
+        self.assertLess(tester.reverse_time - 10.0, 5.02)
+        self.assertIn("reverse_command", tester.events)
+        self.assertIn("reverse_confirmed", tester.events)
+        self.assertEqual(tester.commands[-1], 0.0)
+
+    def test_timed_switch_requires_forward_rotation(self):
+        args = self.parse("--switch-after-s", "0.05")
+        clock = Clock()
+        tester = FakeSequenceTester(clock, [1.0] * 100)
+        with patch.object(rev.time, "monotonic", clock.now):
+            with self.assertRaisesRegex(RuntimeError, "Refusing timed reversal"):
+                rev.run_reversal(tester, args)
+        self.assertNotIn(-1.0, tester.commands)
+
+    def test_timed_switch_is_still_overspeed_guarded(self):
+        args = self.parse("--switch-after-s", "5.0")
+        clock = Clock()
+        tester = FakeSequenceTester(clock, [0.0, 12.0, 45.1])
+        with patch.object(rev.time, "monotonic", clock.now):
+            with self.assertRaisesRegex(RuntimeError, "Overspeed"):
+                rev.run_reversal(tester, args)
+        self.assertNotIn(-1.0, tester.commands)
+
+    def test_reject_invalid_time_hold(self):
+        for value in ("0", "5.1", "nan", "inf"):
+            args = self.parse("--switch-after-s", value)
+            with self.assertRaises(ValueError):
+                rev.preflight(args)
+
+
+
 if __name__ == "__main__":
     unittest.main()
