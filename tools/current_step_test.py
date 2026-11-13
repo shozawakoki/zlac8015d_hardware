@@ -31,6 +31,7 @@ CSV_FIELDS = (
     "actual_left_A", "actual_right_A", "left_rpm", "right_rpm",
     "left_rad_s", "right_rad_s", "velocity_rx_age_ms",
     "current_rx_age_ms", "feedback_can_id", "can_rx_time_s",
+    "readback_left_A", "readback_right_A", "statusword_left", "statusword_right",
 )
 STOP = False
 
@@ -58,6 +59,9 @@ def parser_args(argv=None):
     p.add_argument("--feedback-timeout-ms", type=float, default=100.0)
     p.add_argument("--output", default=None, help="CSV output path (default: ~/ros2_ws/current_step_results/...)")
     p.add_argument("--execute", action="store_true", help="send live motor commands; default is preview")
+    p.add_argument("--probe-target", action="store_true",
+                   help="single short pulse: read 6071 target-current registers and CiA402 status "
+                        "while the command is active, then zero current and end")
     p.add_argument("--confirm-rated-current", action="store_true",
                    help="I verified that motor and driver permit the requested signed current profile")
     p.add_argument("--confirm-wheels-raised", action="store_true",
@@ -84,6 +88,8 @@ def preflight(args, currents):
         raise ValueError("CANopen node-id must be 1..127")
     if not args.interface or len(args.interface) > 15:
         raise ValueError("invalid CAN interface name")
+    if args.probe_target and (len(currents) != 1 or args.step_seconds > 1.0):
+        raise ValueError("--probe-target requires exactly one step of at most 1 second")
     if not (0 < args.step_seconds <= 10 and 20 <= args.loop_hz <= 200):
         raise ValueError("step-seconds must be (0,10], loop-hz 20..200")
     if not (0 < args.max_current_a <= 30 and 0 < args.max_speed_rpm <= 3000):
@@ -150,6 +156,11 @@ class ZlacCurrentTester:
         self.velocity_rx = 0
         self.current_rx = 0
         self.step_started = None
+        self.probe_done = False
+        self.readback_left = float("nan")
+        self.readback_right = float("nan")
+        self.readback_status_l = None
+        self.readback_status_r = None
 
     @property
     def node(self):
@@ -233,6 +244,10 @@ class ZlacCurrentTester:
             "current_rx_age_ms": "" if i_age is None else round(i_age, 3),
             "feedback_can_id": "" if can_id is None else hex(can_id),
             "can_rx_time_s": round(when, 6),
+            "readback_left_A": self.readback_left,
+            "readback_right_A": self.readback_right,
+            "statusword_left": "" if self.readback_status_l is None else f"0x{self.readback_status_l:04X}",
+            "statusword_right": "" if self.readback_status_r is None else f"0x{self.readback_status_r:04X}",
         })
 
     def sdo(self, idx, sub, value, bits, *, allow_interrupt=False):
@@ -279,6 +294,33 @@ class ZlacCurrentTester:
                 raise RuntimeError(f"Unexpected SDO upload response 0x{data[0]:02X}")
             self.process_feedback(item, log=False)
         raise TimeoutError(f"No SDO read response for {idx:04X}:{sub:02X}")
+
+    @staticmethod
+    def signed16(raw):
+        raw &= 0xFFFF
+        return raw - 0x10000 if raw & 0x8000 else raw
+
+    def read_target_during_motion(self):
+        # Only called from --probe-target, while the nonzero current is active.
+        # SDO uploads are read-only; raw target values are in driver-side mA.
+        status = self.sdo_read(0x6041, 0)
+        left_raw = self.sdo_read(0x6071, 1)
+        right_raw = self.sdo_read(0x6071, 2)
+        self.readback_status_l = status & 0xFFFF
+        self.readback_status_r = (status >> 16) & 0xFFFF
+        self.readback_left = -self.signed16(left_raw) / 1000.0
+        self.readback_right = self.signed16(right_raw) / 1000.0
+        print(
+            f"ACTIVE READBACK: cmd left/right={self.command_l:+.3f}/{self.command_r:+.3f} A; "
+            f"6071 target left/right={self.readback_left:+.3f}/{self.readback_right:+.3f} A; "
+            f"actual left/right={self.measured_l:+.3f}/{self.measured_r:+.3f} A; "
+            f"status left/right=0x{self.readback_status_l:04X}/0x{self.readback_status_r:04X}",
+            flush=True)
+        self.log("active_target_readback")
+        if ((self.readback_status_l & 0x006F) != 0x0027 or
+                (self.readback_status_r & 0x006F) != 0x0027):
+            raise RuntimeError("Drive left Operation enabled state during command; "
+                               "aborting due to changed motor state")
 
     def configure_feedback(self, comm, mapping, cob, objects, event_ms):
         self.sdo(comm, 1, 0x80000000 | cob, 32)
@@ -430,6 +472,17 @@ class ZlacCurrentTester:
                 if item:
                     self.process_feedback(item)
                     self.check_safety(time.monotonic())
+            if (self.args.probe_target and not self.probe_done and
+                    time.monotonic() - self.step_started >= 0.15):
+                # Read in-flight register values before the software returns
+                # the target to zero; the previous inspector ran after stop.
+                self.read_target_during_motion()
+                self.probe_done = True
+                self.step_current = 0.0
+                self.command(0.0)
+                self.log("complete_zero")
+                print("Diagnostic pulse ended; zero current sent.", flush=True)
+                return
             if deadline < time.monotonic() - 2*period:
                 deadline = time.monotonic()  # missed a period, avoid command burst
         self.step_current = 0.0
