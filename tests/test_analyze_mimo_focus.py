@@ -48,6 +48,19 @@ class FocusTests(unittest.TestCase):
         self.assertTrue(b["braking_during_overspeed"])
         self.assertFalse(c["composite"])
 
+    def test_yaw_differential_current_opposes_recovery(self):
+        # Omega error positive: turning too fast clockwise, needs CCW correction.
+        # Right-minus-left current negative instead drives clockwise.
+        x=make(1.0,cmd_l=3.0,cmd_r=1.0,
+               ref_l=12.5,ref_r=9.0,
+               vel_l=14.0,vel_r=9.0)
+        o=mod.classify(x,8.0,.05,.1,.5)
+        self.assertTrue(o["composite"])
+        self.assertAlmostEqual(o["diff_cmd_a"],-2.0)
+        self.assertGreater(o["yaw_error_rad_s"],0)
+        self.assertTrue(o["yaw_wrong_sign"])
+        self.assertFalse(o["saturated"])
+
     def test_group_summary(self):
         groups=mod.summarize(self.sample())
         self.assertEqual(groups[0][1],2)
