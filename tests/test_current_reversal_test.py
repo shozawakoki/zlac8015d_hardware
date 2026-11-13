@@ -168,6 +168,7 @@ class ReversalTests(unittest.TestCase):
 
     def test_timed_five_second_hold_then_reverse(self):
         args = self.parse("--switch-after-s", "5.0")
+        self.assertEqual(args.max_reverse_s, 2.0)
         clock = Clock()
 
         class TimedTester(FakeSequenceTester):
