@@ -52,7 +52,18 @@ def classify(row, limit, min_v, min_omega, wheel_err):
         overspeed_wheels.append(overspeed)
         braking_wheels.append(braking)
         driving_while_overspeed.append(driving)
+    yaw_error = a["ref_omega_rad_s"] - a["omega_rad_s"]
+    differential_current = a["cmd_current_right_A"] - a["cmd_current_left_A"]
+    actual_differential_current = (
+        a["actual_current_right_A"] - a["actual_current_left_A"])
+    yaw_wrong_sign = (
+        abs(yaw_error) >= 0.15 and abs(differential_current) >= 0.20
+        and yaw_error * differential_current < 0)
     a.update(
+        yaw_error_rad_s=yaw_error,
+        diff_cmd_a=differential_current,
+        diff_actual_a=actual_differential_current,
+        yaw_wrong_sign=yaw_wrong_sign,
         composite=composite,
         both_track=both_track,
         saturated=saturated,
@@ -105,6 +116,9 @@ def bins(rows, start, end, step):
             "actual_l": mean("actual_current_left_A"),
             "cmd_r": mean("cmd_current_right_A"),
             "actual_r": mean("actual_current_right_A"),
+            "yaw_error": mean("yaw_error_rad_s"),
+            "diff_cmd_a": mean("diff_cmd_a"), "diff_actual_a": mean("diff_actual_a"),
+            "yaw_wrong_pct": rate("yaw_wrong_sign"),
             "sat_pct": rate("saturated"), "track_pct": rate("both_track"),
             "overspeed_pct": rate("overspeed"),
             "drive_overspeed_pct": rate("driving_during_overspeed"),
@@ -118,7 +132,8 @@ def main(argv=None):
     p.add_argument("--start",type=float,default=22.5)
     p.add_argument("--end",type=float,default=24.3)
     p.add_argument("--bin-s",type=float,default=0.1)
-    p.add_argument("--limit-a",type=float,default=2.0)
+    p.add_argument("--limit-a",type=float,default=8.0,
+                   help="ACTUAL hardware current_limit_a, not BREAKAWAY max (branch URDF: 8.0 A)")
     p.add_argument("--wheel-overspeed",type=float,default=0.5,
                    help="minimum wheel velocity excess in rad/s")
     p.add_argument("--min-v",type=float,default=0.05)
@@ -141,7 +156,16 @@ def main(argv=None):
     analyzed=[x for x in analyzed if x is not None]
     if not analyzed:
         p.error("No valid records")
+    observed_peak = max(abs(r[f"cmd_current_{w}_A"])
+                        for r in analyzed for w in ("left", "right"))
+    if observed_peak > args.limit_a + 0.05:
+        p.error(f"Configured --limit-a={args.limit_a:g} A conflicts with "
+                f"logged peak |Icmd|={observed_peak:.3f} A. "
+                "Check the URDF hardware current_limit_a (not breakaway_max_a) "
+                "and rerun using the actual configured current limit.")
     print(f"File: {file}; parsed rows: {len(analyzed)}")
+    print(f"Observed peak |Icmd|={observed_peak:.3f} A; "
+          f"assumed hardware current_limit_a={args.limit_a:.3f} A")
     print(f"Composite threshold |v_ref|>={args.min_v}m/s, "
           f"|omega_ref|>={args.min_omega}rad/s; "
           f"current saturation >= {args.limit_a-.02:.2f} A")
@@ -153,16 +177,19 @@ def main(argv=None):
     focus=list(bins(analyzed,args.start,args.end,args.bin_s))
     print(f"\nFocus {args.start:.2f}-{args.end:.2f}s; "
           f"per-bin means and percent of samples within each bin")
-    print("Time[s]    v_ref/v    omega_ref/omega    left Icmd/Iact    right Icmd/Iact   SAT% TRACK% OVR% DRV% BRK%")
+    print("Time[s]    v_ref/v    omega_ref/omega    left Icmd/Iact    right Icmd/Iact  "
+          "dIcmd/dIact YawErr  SAT% TRACK% OVR% DRV% BRK% YAWbad%")
     for b in focus:
         print(f"{b['t_start_s']:6.2f} "
               f"{b['ref_v']:5.2f}/{b['v']:5.2f} "
               f"{b['ref_omega']:6.2f}/{b['omega']:6.2f} "
               f"{b['cmd_l']:+6.2f}/{b['actual_l']:+6.2f} "
               f"{b['cmd_r']:+6.2f}/{b['actual_r']:+6.2f} "
+              f"{b['diff_cmd_a']:+5.2f}/{b['diff_actual_a']:+5.2f} "
+              f"{b['yaw_error']:+6.2f} "
               f"{b['sat_pct']:5.0f} {b['track_pct']:6.0f} "
               f"{b['overspeed_pct']:4.0f} {b['drive_overspeed_pct']:4.0f} "
-              f"{b['brake_overspeed_pct']:4.0f}")
+              f"{b['brake_overspeed_pct']:4.0f} {b['yaw_wrong_pct']:7.0f}")
     if not focus:
         print("No samples in requested focus interval")
     out=Path(args.out).expanduser() if args.out else file.with_name(
@@ -177,6 +204,10 @@ def main(argv=None):
           "could bias time-weighted interpretation.")
     print("DRV/BRK only classify sign of commanded current relative to measured "
           "overspeeding wheel; they do not establish actual torque.")
+    print("YAWbad: |yaw-error|>=0.15 rad/s and |Iright-Ileft|>=0.20 A "
+          "but the signed differential current opposes yaw-error correction. "
+          "This is NOT proof of controller instability: ESO, friction, "
+          "feedforward and timing can justify transient mismatches.")
     return 0
 
 
