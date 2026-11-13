@@ -234,13 +234,13 @@ class ZlacCurrentTester:
             "can_rx_time_s": round(when, 6),
         })
 
-    def sdo(self, idx, sub, value, bits):
+    def sdo(self, idx, sub, value, bits, *, allow_interrupt=False):
         command = {8: 0x2F, 16: 0x2B, 32: 0x23}[bits]
         packet = bytes([command, idx & 255, idx >> 8, sub]) + int(value).to_bytes(4, "little")
         self.send(0x600 + self.node, packet)
         deadline = time.monotonic() + 0.5
         while time.monotonic() < deadline:
-            if STOP:
+            if STOP and not allow_interrupt:
                 raise InterruptedError("User interruption")
             item = self.receive(deadline-time.monotonic())
             if item is None:
@@ -313,7 +313,7 @@ class ZlacCurrentTester:
                 self.raw_l = self.raw_r = 0
                 self.send(0x200+self.node, b"\x00\x00\x00\x00")
                 time.sleep(0.02)
-            self.sdo(0x6040, 0, 6, 16)  # switch off operation (servo disabled)
+            self.sdo(0x6040, 0, 6, 16, allow_interrupt=True)  # disable operation even after SIGINT
         except (OSError, RuntimeError, TimeoutError) as exc:
             print(f"WARNING: software zero/disable not confirmed: {exc}", file=sys.stderr)
 
