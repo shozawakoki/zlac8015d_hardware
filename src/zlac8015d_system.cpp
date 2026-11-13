@@ -1202,7 +1202,7 @@ hardware_interface::return_type Zlac8015dSystemHardware::write(
     hw_velocities_[0],
     current_l_measured,
     dt,
-    allow_independent_track, mimo_ready, mimo_raw[0]);
+    allow_independent_track, mimo_mode, mimo_ready, mimo_raw[0]);
 
   double cmd_current_r = compute_current_command(
     right_ladrc_, right_pid_,
@@ -1210,7 +1210,7 @@ hardware_interface::return_type Zlac8015dSystemHardware::write(
     hw_velocities_[1],
     current_r_measured,
     dt,
-    allow_independent_track, mimo_ready, mimo_raw[1]);
+    allow_independent_track, mimo_mode, mimo_ready, mimo_raw[1]);
 
   // 0.30 rad/s for 100 ms = 20 samples @ 200 Hz.
   constexpr int COORDINATED_START_SAMPLES = 5;
@@ -1228,6 +1228,19 @@ hardware_interface::return_type Zlac8015dSystemHardware::write(
   {
     left_ladrc_.tracking = true;
     right_ladrc_.tracking = true;
+
+    if (mimo_mode &&
+        (ladrc_ref_l * hw_velocities_[0] < 0.0 ||
+         ladrc_ref_r * hw_velocities_[1] < 0.0))
+    {
+      RCLCPP_WARN(
+        rclcpp::get_logger("Zlac8015dSystemHardware"),
+        "MIMO BREAKAWAY->TRACK during counter-rotation: "
+        "ref[L,R]=[%.3f,%.3f] vel[L,R]=[%.3f,%.3f] rad/s. "
+        "Closed-loop braking enabled.",
+        ladrc_ref_l, ladrc_ref_r,
+        hw_velocities_[0], hw_velocities_[1]);
+    }
 
     left_ladrc_.stall_count = 0;
     right_ladrc_.stall_count = 0;
@@ -1387,6 +1400,7 @@ double Zlac8015dSystemHardware::compute_current_command(
   const double current_measured,
   const double dt,
   const bool allow_track_transition,
+  const bool mimo_torque_mode,
   const bool use_mimo_raw,
   const double mimo_raw_current)
 {
@@ -1397,9 +1411,9 @@ double Zlac8015dSystemHardware::compute_current_command(
   const double BREAKAWAY_STEP_A = breakaway_step_a_;
   const double BREAKAWAY_MAX_A = std::min(breakaway_max_a_, current_limit_a_);
 
-  // During coordinated in-place BREAKAWAY, a wheel that has
-  // already satisfied the start condition waits at this current
-  // while the other wheel continues its BREAKAWAY ramp.
+  // Legacy coordinated startup raises a ready wheel's current to
+  // BREAKAWAY_MAX_A while awaiting the other wheel. In MIMO modes
+  // keep the current target instead to avoid prolonged ±2 A torque.
   const double READY_WAIT_A = BREAKAWAY_MAX_A;
 
   const int BREAKAWAY_STEP_SAMPLES = breakaway_step_samples_;
@@ -1500,8 +1514,13 @@ double Zlac8015dSystemHardware::compute_current_command(
     state.z2 = 0.0;
     state.initialized = true;
 
-    // Require sustained rotation before entering TRACK.
-    if (speed_in_command_direction >= START_SPEED_RAD_S) {
+    // Once moving, closed-loop feedback should control deceleration even
+    // if the wheel is rotating opposite to its reference. Only MIMO modes
+    // use direction-independent TRACK readiness; legacy modes are unchanged.
+    const bool moving_enough = mimo::moving_for_track(
+      velocity_reference, velocity_measured, START_SPEED_RAD_S,
+      mimo_torque_mode);
+    if (moving_enough) {
       ++state.start_count;
     } else {
       state.start_count = 0;
@@ -1519,20 +1538,19 @@ double Zlac8015dSystemHardware::compute_current_command(
 
     // During coordinated READY, use READY_WAIT_A as a minimum current.
     // If a larger current was required to reach READY, keep that value.
-    if (coordinated_ready) {
+    if (coordinated_ready && !mimo_torque_mode) {
       state.breakaway_target =
         std::max(state.breakaway_target, READY_WAIT_A);
     }
 
-    // Once a wheel becomes READY, stop increasing its BREAKAWAY
-    // current and keep at least READY_WAIT_A.
-    // If the wheel required more than READY_WAIT_A to become READY,
-    // keep that larger value.
+    // Once READY, hold the existing BREAKAWAY current; in MIMO modes
+    // do not raise it to the maximum merely because the other wheel
+    // has not completed its transition.
 
     // Increase target every BREAKAWAY_STEP_SAMPLES cycles only while
     // this wheel is not yet ready.
     if (!coordinated_ready &&
-        speed_in_command_direction < START_SPEED_RAD_S &&
+        !moving_enough &&
         state.breakaway_count > 0 &&
         state.breakaway_count % BREAKAWAY_STEP_SAMPLES == 0)
     {
