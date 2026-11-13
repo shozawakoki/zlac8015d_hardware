@@ -123,6 +123,24 @@ python3 tools/current_step_test.py \
 
 時刻差と各電流区間を比較するときは、`event=current_rx` の行で電流値を、`event=velocity_rx` の行で速度値を確認する。それ以外の欄には直近で受信した値が保持される。
 
+## 保存データの分析とグラフ作成
+
+試験終了後、CSVファイル名を確認し、次のコマンドを実行する。
+
+~~~bash
+ls -lt ~/ros2_ws/current_step_results/*.csv | head
+
+# 必要なら matplotlib をインストール（PNGグラフ出力用）
+sudo apt install python3-matplotlib
+
+LATEST=$(ls -t ~/ros2_ws/current_step_results/*.csv | head -n 1)
+python3 ~/ros2_ws/src/zlac8015d_hardware/tools/analyze_current_step.py "$LATEST" --plots
+~~~
+
+各段の指令電流と実電流の平均値、平均絶対誤差（MAE）、最大絶対誤差、最高回転速度を表示する。同じディレクトリに電流指令・実電流比較グラフ（`*_current.png`）と車輪回転速度グラフ（`*_rpm.png`）を別々に保存する。
+
+**注意：** この集計はステップ応答初期の過渡区間も含むため、指令追従の定常誤差だけを示すものではない。電流応答遅れと定常値はグラフから別々に評価すること。途中で過速度停止した場合、記録されていない段の結果は表示されない。
+
 ## 原因切り分けの観点
 
 - **指令と実電流が大きく異なる：** CAN符号/単位、モータドライバの内部電流制御、電流制限、電源、通信・更新周期などを調査する
