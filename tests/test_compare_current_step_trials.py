@@ -73,6 +73,21 @@ class TrialComparisonTests(unittest.TestCase):
         self.assertEqual(len(r["bins"]), 7)
         self.assertEqual(r["start_held_rpm"], 0)
 
+    def test_exact_multiple_window_has_no_phantom_bin(self):
+        self.save(fake_rows())
+        r = mod.extract(self.csv_path, window=0.14, bin_s=0.02)
+        self.assertEqual(len(r["bins"]), 7)
+        self.assertTrue(all(hi > lo for lo, hi, *_ in r["bins"]))
+        self.assertAlmostEqual(r["bins"][-1][1], 0.14)
+        self.assertEqual(mod.fmt_time(None), "n/a")
+
+    def test_non_multiple_window_has_short_final_bin(self):
+        self.save(fake_rows())
+        r = mod.extract(self.csv_path, window=0.135, bin_s=0.02)
+        self.assertEqual(len(r["bins"]), 7)
+        self.assertAlmostEqual(r["bins"][-1][0], 0.12)
+        self.assertAlmostEqual(r["bins"][-1][1], 0.135)
+
     def test_preflight_event_detected(self):
         self.save(fake_rows(preflight=True))
         r = mod.extract(self.csv_path)
