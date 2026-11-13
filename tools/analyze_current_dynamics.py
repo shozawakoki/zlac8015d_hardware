@@ -152,10 +152,13 @@ def main(argv=None):
     print(f"Command={report['command_A']:+.3f} A; actual mean={report['mean_current_A']:+.3f} A; "
           f"max wheel speed={report['max_abs_rpm']:.1f} rpm")
     print(f"Fresh TPDO current={report['n_current']}; speed={report['n_velocity']}")
+    early_end = min(0.20, report["duration_s"])
+    later_end = min(0.80, report["duration_s"])
     for key, name, unit in [
-        ("early_dI_dt_A_s", "Linear-fit actual-current slope 0–0.2 s", "A/s"),
-        ("later_dI_dt_A_s", "Linear-fit actual-current slope 0.2–0.8 s", "A/s"),
-        ("wheel_accel_rad_s2", "Linear-fit wheel angular acceleration", "rad/s^2"),
+        ("early_dI_dt_A_s", f"Linear-fit actual-current slope 0–{early_end:.2f} s", "A/s"),
+        ("later_dI_dt_A_s", f"Linear-fit actual-current slope 0.2–{later_end:.2f} s", "A/s"),
+        ("wheel_accel_rad_s2",
+         f"Linear-fit wheel angular acceleration (0.2–{later_end:.2f} s)", "rad/s^2"),
     ]:
         val = report[key]
         print(f"{name}: {'not enough samples' if val is None else f'{val:+.3f} ' + unit}")
