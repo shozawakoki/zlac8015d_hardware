@@ -112,6 +112,26 @@ class ReversalTests(unittest.TestCase):
         args = self.parse("--max-speed-rpm", "120", "--verified-safe-rpm", "150")
         self.assertFalse(rev.preflight(args))
 
+    def test_370_rpm_limit_requires_matching_verified_safe_rating(self):
+        args = self.parse("--switch-after-s", "5.0", "--max-speed-rpm", "370")
+        with self.assertRaisesRegex(ValueError, "verified-safe-rpm"):
+            rev.preflight(args)
+
+        args = self.parse(
+            "--switch-after-s", "5.0",
+            "--max-speed-rpm", "370",
+            "--verified-safe-rpm", "370"
+        )
+        self.assertFalse(rev.preflight(args))
+
+        args = self.parse(
+            "--switch-after-s", "5.0",
+            "--max-speed-rpm", "371",
+            "--verified-safe-rpm", "400"
+        )
+        with self.assertRaisesRegex(ValueError, "370 rpm"):
+            rev.preflight(args)
+
     def test_live_requires_regeneration_approval(self):
         args = self.parse("--execute")
         with self.assertRaisesRegex(ValueError, "confirm-rated-current"):
