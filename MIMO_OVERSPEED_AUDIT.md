@@ -76,3 +76,37 @@ python3 tools/analyze_mimo_focus.py \
 全複合運動のTRACK可否による飽和率・車輪速度超過率を比較する。指定区間では0.1秒ごとに車体目標/実速度、左右指令/実電流、飽和率、TRACK率、車輪速度超過率、速度超過中に加速方向または制動方向の**指令**を出した率を表示し、対応するCSVを保存する。
 
 「加速方向/制動方向」は電流指令と実際の車輪速度の符号から分類したもので、ドライバが発生した物理トルクの独立計測ではない。ブレーキ指令が出ていても電流フィードバックの反転に時間がかかる可能性がある。複合運動時のmimo_readyそのものは既存ログに含まれないため、TRACKの組合せだけでは正確な切替履歴は分からない。
+
+## 2026-11-13：8 A上限での再解析とESO補償項の検証
+
+実機ログの複合運動 26,171 サンプルに対し、8 A上限での飽和率は **0.076%**（20サンプル、171.753–171.848秒）。旧解析の44.5%は2 Aを閾値にした割合であり、飽和率ではなかった。
+
+23.5–24.3秒の全サンプルは両輪TRACKであり、8 A飽和なし。例として23.9秒の区間平均値：
+- 目標 `omega_ref=-0.60 rad/s`、ESO速度推定 `hat_omega=-0.78 rad/s`
+- ESO総外乱推定 `hat_d_omega=+4.67 rad/s²`
+- `wc_omega=5 rad/s`、`b0=18 rad/s²/A`、`wheel_radius=.064 m`、`wheel_separation=.354 m`
+- 速度偏差項 `wc*(omega_ref-hat_omega)=+0.90 rad/s²`
+- 外乱補償項 `-hat_d_omega=-4.67 rad/s²`
+- `I_R-I_L=(0.90-4.67)/(18*.064/.354)=-1.1585 A`
+- ログの最終左右指令電流差 `1.32-2.49=-1.17 A`
+
+この一致はMIMO-LADRCの**計算とログに整合性がある**ことを示す。推定総外乱が物理的に正しいことは保証しない。また左・右の最終電流指令には上限、スルーレート、床値処理が存在するので、全区間で式が厳密に一致するとは限らない。
+
+記録済みCSVからESO制御項を分離して検証する（ROS/SocketCANに触れず、実機を動かさない）。
+
+```bash
+cd ~/ros2_ws/src/zlac8015d_hardware
+git pull --ff-only origin feat/mimo-ladrc-pid-straight-tracking
+python3 -m unittest discover -s tests -p 'test_analyze_mimo_eso_balance.py' -v
+python3 tools/analyze_mimo_eso_balance.py \
+  ~/ros2_ws/mimo_results/mimo_ladrc_original.csv \
+  --start 23.5 --end 24.3 --bin-s 0.1 \
+  --wc-omega 5.0 --b0 18.0 \
+  --wheel-radius 0.064 --wheel-separation 0.354
+python3 tools/analyze_mimo_overspeed.py \
+  ~/ros2_ws/mimo_results/mimo_ladrc_original.csv --limit-a 8.0
+```
+
+後者の解析結果には、最大並進速度偏差・最大角速度偏差を記録した時刻、およびその時刻の左右指令電流とTRACK状態も出力する。
+
+**重要：** 観測された23.9秒の `I_R-I_L<0` は、推定総外乱による加速度 `+4.67 rad/s²` と相殺され、推定正味角加速度は `+0.90 rad/s²` になる。これは目標角速度との差を減らす方向であるため、負の電流差だけで「制御が逆向き」とは断定できない。ESO外乱の推定誤差・推定遅れは別途評価する。
