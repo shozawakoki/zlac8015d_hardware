@@ -32,6 +32,8 @@ CSV_FIELDS = (
     "left_rad_s", "right_rad_s", "velocity_rx_age_ms",
     "current_rx_age_ms", "feedback_can_id", "can_rx_time_s",
     "readback_left_A", "readback_right_A", "statusword_left", "statusword_right",
+    "preflight_mode_display", "preflight_actual_left_A", "preflight_actual_right_A",
+    "preflight_bus_voltage_V",
 )
 STOP = False
 
@@ -57,6 +59,14 @@ def parser_args(argv=None):
     p.add_argument("--max-speed-rpm", type=float, default=120.0,
                    help="abort the test if either wheel exceeds this speed")
     p.add_argument("--feedback-timeout-ms", type=float, default=100.0)
+    p.add_argument("--settle-seconds", type=float, default=1.0,
+                   help="consecutive zero-current, stationary seconds required before a step")
+    p.add_argument("--settle-timeout-seconds", type=float, default=5.0,
+                   help="abort if zero-current stable condition is not reached")
+    p.add_argument("--settle-max-rpm", type=float, default=0.5,
+                   help="maximum absolute wheel speed during zero-current baseline")
+    p.add_argument("--settle-max-current-a", type=float, default=0.1,
+                   help="maximum absolute 6077h current during baseline (0.1 A resolution)")
     p.add_argument("--output", default=None, help="CSV output path (default: ~/ros2_ws/current_step_results/...)")
     p.add_argument("--execute", action="store_true", help="send live motor commands; default is preview")
     p.add_argument("--probe-target", action="store_true",
@@ -96,6 +106,11 @@ def preflight(args, currents):
         raise ValueError("max-current-a / max-speed-rpm out of permitted parameter range")
     if not (30 <= args.feedback_timeout_ms <= 500):
         raise ValueError("feedback-timeout-ms must be 30..500")
+    if (not (0.1 <= args.settle_seconds <= 5.0) or
+            not (args.settle_seconds < args.settle_timeout_seconds <= 30.0) or
+            not (0.0 < args.settle_max_rpm <= 2.0) or
+            not (0.0 <= args.settle_max_current_a <= 0.3)):
+        raise ValueError("Invalid zero-current baseline limits/settling duration")
     max_requested = max(abs(v) for v in currents)
     if max_requested > 30.0:
         raise ValueError("requested current cannot exceed signed 16-bit mA envelope")
@@ -161,6 +176,10 @@ class ZlacCurrentTester:
         self.readback_right = float("nan")
         self.readback_status_l = None
         self.readback_status_r = None
+        self.preflight_mode_display = None
+        self.preflight_actual_left = float("nan")
+        self.preflight_actual_right = float("nan")
+        self.preflight_bus_voltage = float("nan")
 
     @property
     def node(self):
@@ -248,6 +267,10 @@ class ZlacCurrentTester:
             "readback_right_A": self.readback_right,
             "statusword_left": "" if self.readback_status_l is None else f"0x{self.readback_status_l:04X}",
             "statusword_right": "" if self.readback_status_r is None else f"0x{self.readback_status_r:04X}",
+            "preflight_mode_display": self.preflight_mode_display,
+            "preflight_actual_left_A": self.preflight_actual_left,
+            "preflight_actual_right_A": self.preflight_actual_right,
+            "preflight_bus_voltage_V": self.preflight_bus_voltage,
         })
 
     def sdo(self, idx, sub, value, bits, *, allow_interrupt=False):
@@ -457,8 +480,110 @@ class ZlacCurrentTester:
                                    "and wheel speed remain near zero. Check "
                                    "drive state, RPDO and motor power.")
 
+
+    def stable_zero_feedback(self, now, *, min_timestamp=None):
+        """Require fresh TPDO from BOTH wheels, near-zero currents and speeds.
+
+        A fresh CAN frame is necessary: an old held value must never qualify.
+        All four quantities are checked, even for a one-wheel step experiment.
+        """
+        timeout = self.args.feedback_timeout_ms / 1000.0
+        if (self.last_vel_time is None or self.last_cur_time is None or
+                now-self.last_vel_time > timeout or
+                now-self.last_cur_time > timeout or
+                (min_timestamp is not None and
+                 (self.last_vel_time < min_timestamp or self.last_cur_time < min_timestamp))):
+            return False
+        values = (self.rpm_l, self.rpm_r, self.measured_l, self.measured_r)
+        if not all(math.isfinite(v) for v in values):
+            return False
+        return (abs(self.rpm_l) <= self.args.settle_max_rpm and
+                abs(self.rpm_r) <= self.args.settle_max_rpm and
+                abs(self.measured_l) <= self.args.settle_max_current_a + 1e-9 and
+                abs(self.measured_r) <= self.args.settle_max_current_a + 1e-9)
+
+    def wait_for_stable_zero(self):
+        """Hold ZERO RPDO only; abort instead of starting from rolling wheels.
+
+        No nonzero motor commands are sent by this method.
+        """
+        start = time.monotonic()
+        stable_since = None
+        self.command(0.0)
+        while True:
+            if STOP:
+                raise InterruptedError("Interrupted during zero-current baseline")
+            now = time.monotonic()
+            if now-start > self.args.settle_timeout_seconds:
+                raise RuntimeError(
+                    "Preflight zero-current stability timeout: "
+                    f"wheel rpm L/R={self.rpm_l:+.2f}/{self.rpm_r:+.2f}; "
+                    f"6077h current L/R={self.measured_l:+.2f}/{self.measured_r:+.2f}. "
+                    "No nonzero step started.")
+            self.command(0.0)
+            incoming = self.receive(0.01)
+            if incoming:
+                self.process_feedback(incoming, log=False)
+            now = time.monotonic()
+            self.check_safety(now)
+            if self.stable_zero_feedback(now, min_timestamp=start):
+                if stable_since is None:
+                    stable_since = now
+                if now-stable_since >= self.args.settle_seconds:
+                    print(
+                        f"Zero baseline verified for {self.args.settle_seconds:.2f}s: "
+                        f"speed L/R={self.rpm_l:+.2f}/{self.rpm_r:+.2f} rpm, "
+                        f"6077h L/R={self.measured_l:+.2f}/{self.measured_r:+.2f} A",
+                        flush=True)
+                    return
+            else:
+                stable_since = None
+
+    def read_preflight_snapshot(self):
+        """Read-only SDO baseline after settling and BEFORE nonzero current.
+
+        Abort if the drive mode, status or zero-target readback is inconsistent.
+        Vendor 6077h is feedback in 0.1 A, NOT independently measured phase current.
+        """
+        sw = self.sdo_read(0x6041, 0, timeout_s=0.15)
+        mode = self.sdo_read(0x6061, 0, timeout_s=0.15)
+        target_l = -self.signed16(self.sdo_read(0x6071, 1, timeout_s=0.15)) / 1000.0
+        target_r = self.signed16(self.sdo_read(0x6071, 2, timeout_s=0.15)) / 1000.0
+        actual_l = -self.signed16(self.sdo_read(0x6077, 1, timeout_s=0.15)) * 0.1
+        actual_r = self.signed16(self.sdo_read(0x6077, 2, timeout_s=0.15)) * 0.1
+        voltage = self.sdo_read(0x2035, 0, timeout_s=0.15) * 0.01
+        self.require_motors_available(sw)
+        if mode != 4:
+            raise RuntimeError("Preflight mode changed; refusing nonzero motor current")
+        if abs(target_l) > 0.01 or abs(target_r) > 0.01:
+            raise RuntimeError(
+                f"Preflight 6071h target not zero: L/R={target_l:+.3f}/{target_r:+.3f} A")
+        if (abs(actual_l) > self.args.settle_max_current_a+1e-9 or
+                abs(actual_r) > self.args.settle_max_current_a+1e-9):
+            raise RuntimeError("Preflight 6077h differs from zero-current baseline")
+        now = time.monotonic()
+        if not self.stable_zero_feedback(now):
+            raise RuntimeError("Preflight unstable or stale after SDO snapshot; refusing step")
+        self.readback_status_l = (sw >> 16) & 0xFFFF
+        self.readback_status_r = sw & 0xFFFF
+        self.readback_left = target_l
+        self.readback_right = target_r
+        self.preflight_actual_left = actual_l
+        self.preflight_actual_right = actual_r
+        self.preflight_mode_display = mode
+        self.preflight_bus_voltage = voltage
+        self.log("preflight_verified", now)
+        print(
+            f"Preflight SDO: 6041h L/R=0x{self.readback_status_l:04X}/"
+            f"0x{self.readback_status_r:04X}; 6061h={mode}; "
+            f"6071h L/R={target_l:+.3f}/{target_r:+.3f} A; "
+            f"6077h L/R={actual_l:+.3f}/{actual_r:+.3f} A; "
+            f"DC bus={voltage:.2f} V", flush=True)
+
     def run(self, profile):
         self.wait_feedback()
+        self.wait_for_stable_zero()
+        self.read_preflight_snapshot()
         self.t0 = time.monotonic()
         self.log("start", self.t0)
         period = 1.0 / self.args.loop_hz
