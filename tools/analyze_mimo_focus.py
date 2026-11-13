@@ -188,17 +188,17 @@ def main(argv=None):
     print("Time[s]    v_ref/v    omega_ref/omega    left Icmd/Iact    right Icmd/Iact  "
           "dIcmd/dIact YawErr HatOmega HatDomega SAT% TRACK% OVR% DRV% BRK% YAWbad%")
     for b in focus:
+        h_omega = (f"{b['hat_omega']:+7.2f}" if isinstance(b['hat_omega'], (int, float))
+                   else "    -- ")
+        h_dist = (f"{b['hat_d_omega']:+8.2f}" if isinstance(b['hat_d_omega'], (int, float))
+                  else "     -- ")
         print(f"{b['t_start_s']:6.2f} "
               f"{b['ref_v']:5.2f}/{b['v']:5.2f} "
               f"{b['ref_omega']:6.2f}/{b['omega']:6.2f} "
               f"{b['cmd_l']:+6.2f}/{b['actual_l']:+6.2f} "
               f"{b['cmd_r']:+6.2f}/{b['actual_r']:+6.2f} "
               f"{b['diff_cmd_a']:+5.2f}/{b['diff_actual_a']:+5.2f} "
-              f"{b['yaw_error']:+6.2f} "
-              f"{b['hat_omega']:+7.2f} " if isinstance(b['hat_omega'], float) else
-              f"{b['yaw_error']:+6.2f}     --  "
-              f"{b['hat_d_omega']:+8.2f} " if isinstance(b['hat_d_omega'], float) else
-              f"    --    "
+              f"{b['yaw_error']:+6.2f} {h_omega} {h_dist} "
               f"{b['sat_pct']:5.0f} {b['track_pct']:6.0f} "
               f"{b['overspeed_pct']:4.0f} {b['drive_overspeed_pct']:4.0f} "
               f"{b['brake_overspeed_pct']:4.0f} {b['yaw_wrong_pct']:7.0f}")
