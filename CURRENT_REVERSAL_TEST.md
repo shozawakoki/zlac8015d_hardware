@@ -89,3 +89,32 @@ python3 tools/analyze_current_reversal.py \
 ## 4. 従来の速度トリガーモード
 
 --switch-after-s を省略すると従来どおり --switch-rpm 15 で速度検出時に電流を反転する。こちらの逆回転観測時間の既定は0.4秒。
+
+
+## 5. 5秒保持の実機コマンド（安全確認済み構成・2008h=370 rpm）
+
+既知の設定値が 2008h=370 rpm であり、試験装置・制動回生の安全性を確認済みの場合：
+
+~~~bash
+cd ~/ros2_ws/src/zlac8015d_hardware
+git pull --ff-only origin feat/mimo-ladrc-pid-straight-tracking
+python3 -m unittest discover -s tests -p 'test_current_reversal_test.py' -v
+
+python3 tools/current_reversal_test.py \
+  --execute \
+  --wheel left \
+  --current-a 1.0 \
+  --switch-after-s 5.0 \
+  --reverse-confirm-rpm 3 \
+  --max-speed-rpm 370 \
+  --verified-safe-rpm 370 \
+  --confirm-rated-current \
+  --confirm-wheels-raised \
+  --confirm-e-stop \
+  --confirm-exclusive-can \
+  --confirm-regeneration-safe
+~~~
+
+370 rpmは速度目標ではなく、**速度超過時に試験を停止する閾値**である。試験開始前に2008hを読み直し、設定値より高いソフトウェア閾値なら非ゼロ電流を印加せずに拒否する。
+
+停止成功・失敗にかかわらずCSVファイルは current_step_results 配下に記録。逆回転を2回連続検出したら0 A指令・サーボ無効化へ進む。最大2秒で逆回転が確認できなければ中断。実機の回転数が370 rpmを超過した場合は5秒を待たずに中断するため、5秒後の反転は実施されないことがある。物理非常停止は常に使用可能にする。
