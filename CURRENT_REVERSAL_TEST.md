@@ -136,3 +136,44 @@ python3 tools/analyze_current_reversal.py \
 ~~~
 
 この試験では **−1 A指令による制動・逆回転を確認できていない**。370 rpmという設定値に達してもトルク制御で安全に速度が維持されると証明できないため、上限を上げたり無効化して5秒試験を強行しない。
+
+
+## 7. 5秒間の電流反転試験：速度によるソフトウェア停止を明示的に無効化
+
+安全確認済みの設備で、ソフトウェア側の速度停止を実験者が明示的に無効化する際は --disable-speed-abort と --confirm-hardware-speed-limiting を指定する。このモードでは370 rpmを少し超えた値をCANから受信しても、速度条件のみでは中断しない。ただし速度データの受信・保存・正方向と逆方向の判定は継続する。
+
+このオプションは --switch-after-s 5.0 とセットの場合に限り有効。通電直前の2008h設定値が370 rpmと一致しなければ通電を拒否する。
+
+~~~bash
+cd ~/ros2_ws/src/zlac8015d_hardware
+git pull --ff-only origin feat/mimo-ladrc-pid-straight-tracking
+python3 -m unittest discover -s tests -p 'test_current_reversal_test.py' -v
+
+python3 tools/current_reversal_test.py \
+  --execute \
+  --wheel left \
+  --current-a 1.0 \
+  --switch-after-s 5.0 \
+  --reverse-confirm-rpm 3 \
+  --disable-speed-abort \
+  --confirm-hardware-speed-limiting \
+  --confirm-rated-current \
+  --confirm-wheels-raised \
+  --confirm-e-stop \
+  --confirm-exclusive-can \
+  --confirm-regeneration-safe
+~~~
+
+注意：
+
+- 以前の検証では370 rpm設定に対して実測372.3 rpmが記録された。2008hがトルクモードで速度を厳密に保証する根拠とはならない。
+- 速度によるソフトウェア異常停止を解除することで、実機が際限なく加速する不具合をソフトウェアが検知しても停止しなくなる。物理非常停止・固定治具・回生制動電源・ドライバの安全機能に依存するため安全確認済みの環境でのみ使用する。
+- CANフィードバックタイムアウト、実電流の異常、非指令車輪の回転監視、5秒経過後の負電流反転、反転後2秒のタイムアウト、0 A指令・サーボ無効化は引き続き有効。
+- --execute を省略した場合はプレビュー専用でモータを駆動しない。
+
+保存後のオフライン解析：
+
+~~~bash
+CSV=$(ls -t ~/ros2_ws/current_step_results/current_reversal_*_left.csv | head -n 1)
+python3 tools/analyze_current_reversal.py "$CSV" --wheel left
+~~~
