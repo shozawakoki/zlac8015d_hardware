@@ -415,3 +415,21 @@ tail -n 5 /tmp/pid_track_200hz.csv
 ## ライセンス
 
 現行 `package.xml` のライセンス欄は `TODO` です。公開・再利用条件は正式なライセンス表記が設定されるまで未確定です。
+
+
+## Experimental MIMO-LADRC / MIMO-PID modes
+
+The branch `feat/mimo-ladrc-pid-straight-tracking` adds two **opt-in** current-command modes: `mimo_ladrc_torque` and `mimo_pid_torque`. The existing `velocity`, `ladrc_torque`, and `pid_torque` modes remain available.
+
+The matrix model and controller implementation live in [`include/zlac8015d_hardware/mimo_control.hpp`](include/zlac8015d_hardware/mimo_control.hpp). The C++ hardware plugin performs the same BREAKAWAY, TRACK, stall protection, current limits, normal-stop ramp, and CAN packing as the legacy implementation; it enables coupled body-coordinate control only after both wheels are in TRACK. The transformed feedback is encoder-derived `[v, omega]`. Neither an IMU feedback loop nor a heading controller has been added.
+
+The initial MIMO LADRC bandwidths are `wc_v=wc_omega=5` and `wo_v=wo_omega=20` rad/s. The MIMO PID gains are seeded from wheel PID `Kp=0.7, Ki=0.5, Kd=0.03` with derivative filter `tau=0.05 s`. Independent body-axis parameters are set in the matching bringup URDF (wheel radius 0.064 m, separation 0.354 m). Equal v/yaw gains reproduce legacy control under symmetric, unsaturated plant assumptions; MIMO by itself does **not** guarantee straighter actual motion.
+
+For build, mode selection, logging, and experimental/safety constraints, see the [companion bringup instructions](https://github.com/shozawakoki/zlac8015d_can_bringup/blob/feat/mimo-ladrc-pid-straight-tracking/MIMO_CONTROL.md). The standard-library-only test can be run without ROS:
+
+```bash
+g++ -std=c++17 -Wall -Wextra -pedantic -Iinclude tests/test_mimo_control.cpp -o /tmp/test_mimo_control
+/tmp/test_mimo_control
+```
+
+**Unverified:** the new mode has not been compiled against ROS 2 Humble or tested on a physical robot in this workspace; the matrix test does not constitute hardware validation.
