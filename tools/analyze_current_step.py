@@ -28,12 +28,21 @@ def number(row, key):
 
 
 def summarize(rows, wheel):
+    # Ignore post-profile coasting. In the original CSV the final step index
+    # persists during the one-second zero-command coast, inflating step 7 MAE.
+    cutoff_times = [number(row, "elapsed_s") for row in rows
+                    if row["event"] == "complete_zero"]
+    cutoff_times = [x for x in cutoff_times if x is not None]
+    end_of_active_profile = min(cutoff_times) if cutoff_times else math.inf
     measured = f"actual_{wheel}_A"
     commanded = f"command_{wheel}_A"
     velocity = f"{wheel}_rpm"
     groups = {}
     for row in rows:
         if row["event"] != "current_rx":
+            continue
+        elapsed = number(row, "elapsed_s")
+        if elapsed is None or elapsed >= end_of_active_profile:
             continue
         try:
             stage = int(row["step_index"])
@@ -108,14 +117,20 @@ def main(argv=None):
     p.add_argument("--plots", action="store_true", help="write separate current / speed PNGs (matplotlib)")
     args = p.parse_args(argv)
     rows = load(args.csv_file)
-    print("Current tracking by step. Includes the transient immediately after each step:")
+    print("Current tracking by step (active profile only; post-test zero-current coast excluded).")
+    print("Each step includes the transient immediately after its command change.")
     for wheel in ("left", "right"):
         print(f"\n{wheel.upper()} wheel")
         print("step  requested[A]  mean_actual[A]  MAE[A]  max_error[A]  max_rpm  samples")
-        for rec in summarize(rows, wheel):
+        summary = summarize(rows, wheel)
+        for rec in summary:
             print(f"{rec['stage']:>4}  {rec['requested_A']:>11.2f}  "
                   f"{rec['mean_actual_A']:>14.3f}  {rec['mean_abs_error_A']:>6.3f}  "
                   f"{rec['max_abs_error_A']:>12.3f}  {rec['max_abs_rpm']:>7.1f}  {rec['count']:>7}")
+        active = [rec for rec in summary if abs(rec["requested_A"]) >= 0.5]
+        if active and all(abs(rec["mean_actual_A"]) <= 0.05 for rec in active) and wheel == "left":
+            print("WARNING: Nonzero current commands, but average actual current "
+                  "is near zero in every active step. Check drive enable, mode and RPDO.")
     if args.plots:
         try:
             make_plots(rows, Path(args.csv_file).with_suffix(""))
