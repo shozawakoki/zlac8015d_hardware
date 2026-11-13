@@ -75,6 +75,7 @@ def main():
         ("CiA402 statusword right (if supported)", 0x6041, 2),
         ("Mode of operation display", 0x6061, 0),
         ("Error code", 0x603F, 0),
+        ("Motor maximum working speed setting [rpm] (not proof of active limiting)", 0x2008, 0),
         ("Configured rated current left [0.1 A]", 0x2014, 1),
         ("Configured rated current right [0.1 A]", 0x2014, 2),
         ("Configured max current left [0.1 A]", 0x2015, 1),
@@ -117,6 +118,9 @@ def main():
                         extra += " [NOT BOTH OPERATION ENABLED]"
                 elif index == 0x6061:
                     extra = f" => {'Profile Torque' if value == 4 else 'NOT Profile Torque'}"
+                elif index == 0x2008:
+                    extra = (" => configured motor max working speed; "
+                             "not proof of torque-mode speed regulation")
                 elif index in (0x2014, 0x2015):
                     extra = f" => {value / 10.0:.1f} A (configured, not an independent rating check)"
                 elif index == 0x2035:
