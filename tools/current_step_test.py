@@ -149,6 +149,7 @@ class ZlacCurrentTester:
         self.raw_r = 0
         self.velocity_rx = 0
         self.current_rx = 0
+        self.step_started = None
 
     @property
     def node(self):
@@ -255,6 +256,30 @@ class ZlacCurrentTester:
             self.process_feedback(item, log=False)
         raise TimeoutError(f"No SDO ACK for {idx:04X}:{sub:02X}")
 
+    def sdo_read(self, idx, sub):
+        # Read-only expedited SDO upload, used to VERIFY servo state before
+        # applying a non-zero RPDO current (SDO write ACK alone is insufficient).
+        req = bytes([0x40, idx & 255, idx >> 8, sub, 0, 0, 0, 0])
+        self.send(0x600 + self.node, req)
+        deadline = time.monotonic() + 0.5
+        while time.monotonic() < deadline:
+            if STOP:
+                raise InterruptedError("User interruption")
+            item = self.receive(deadline - time.monotonic())
+            if item is None:
+                continue
+            can_id, data, _when = item
+            if can_id == 0x580 + self.node and len(data) >= 8 and data[1:4] == req[1:4]:
+                if data[0] == 0x80:
+                    abort = int.from_bytes(data[4:8], "little")
+                    raise RuntimeError(f"SDO read aborted {idx:04X}:{sub:02X} code=0x{abort:08X}")
+                if (data[0] & 0xE3) == 0x43:
+                    count = 4 - ((data[0] >> 2) & 3)
+                    return int.from_bytes(data[4:4+count], "little")
+                raise RuntimeError(f"Unexpected SDO upload response 0x{data[0]:02X}")
+            self.process_feedback(item, log=False)
+        raise TimeoutError(f"No SDO read response for {idx:04X}:{sub:02X}")
+
     def configure_feedback(self, comm, mapping, cob, objects, event_ms):
         self.sdo(comm, 1, 0x80000000 | cob, 32)
         self.sdo(mapping, 0, 0, 8)
@@ -293,6 +318,16 @@ class ZlacCurrentTester:
             self.sdo(0x6040, 0, cw, 16)
             time.sleep(0.01)
         self.command(0.0)
+        sw = self.sdo_read(0x6041, 0)
+        mode = self.sdo_read(0x6061, 0)
+        print(f"Drive readback: CiA402 statusword=0x{sw:04X}, "
+              f"mode-display={mode} (expected 4=Profile Torque)")
+        if (sw & 0x006F) != 0x0027:
+            raise RuntimeError("Drive is not Operation Enabled (6041 statusword); "
+                               "refusing any nonzero current")
+        if mode != 4:
+            raise RuntimeError("Drive mode is not Profile Torque (6061 display); "
+                               "refusing any nonzero current")
 
     def command(self, amp):
         if abs(amp) > self.args.max_current_a + 1e-9:
@@ -346,6 +381,17 @@ class ZlacCurrentTester:
         if (abs(self.measured_l) > self.args.max_current_a + 1.0 or
                 abs(self.measured_r) > self.args.max_current_a + 1.0):
             raise RuntimeError("Measured motor current exceeds software limit by >1 A")
+        # When a substantial command produces NEITHER real current NOR
+        # wheel motion, do not keep applying higher steps for 21 seconds.
+        if self.step_started is not None and when - self.step_started >= 0.75:
+            channels = ((self.command_l, self.measured_l, self.rpm_l),
+                        (self.command_r, self.measured_r, self.rpm_r))
+            if any(abs(cmd) >= 1.0 and abs(actual) < 0.2 and abs(rpm) < 1.0
+                   for cmd, actual, rpm in channels):
+                raise RuntimeError("No actuator response after 0.75 s: "
+                                   "nonzero current command but measured current "
+                                   "and wheel speed remain near zero. Check "
+                                   "drive state, RPDO and motor power.")
 
     def run(self, profile):
         self.wait_feedback()
@@ -363,6 +409,7 @@ class ZlacCurrentTester:
             idx = min(int(elapsed / self.args.step_seconds), len(profile)-1)
             if idx != self.stage:
                 self.stage = idx
+                self.step_started = now
                 self.step_current = profile[idx]
                 print(f"t={elapsed:.3f}s stage={idx+1}/{len(profile)} "
                       f"command {self.step_current:+.2f} A [{self.args.wheel}]", flush=True)
