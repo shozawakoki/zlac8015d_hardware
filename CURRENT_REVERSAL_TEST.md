@@ -118,3 +118,21 @@ python3 tools/current_reversal_test.py \
 370 rpmは速度目標ではなく、**速度超過時に試験を停止する閾値**である。試験開始前に2008hを読み直し、設定値より高いソフトウェア閾値なら非ゼロ電流を印加せずに拒否する。
 
 停止成功・失敗にかかわらずCSVファイルは current_step_results 配下に記録。逆回転を2回連続検出したら0 A指令・サーボ無効化へ進む。最大2秒で逆回転が確認できなければ中断。実機の回転数が370 rpmを超過した場合は5秒を待たずに中断するため、5秒後の反転は実施されないことがある。物理非常停止は常に使用可能にする。
+
+
+## 6. 2026-11-13 過速度中断CSVのオフライン解析
+
+5秒保持試験を370 rpmの停止閾値で実行したところ、左輪372.3 rpmを受信して中断。反転コマンドが送られなかったため、旧解析器は reverse_command がない旨のエラーを出した。これはCSVの欠損ではなく、試験が反転前に安全停止したため。
+
+更新した analyze_current_reversal.py は反転イベントがなくても forward_start を起点に最後の新規速度受信時刻、最大速度とその時刻、45/100/200/300/350/370 rpmへの初到達時刻、実電流の最小・平均・最大値を表示する。
+
+~~~bash
+cd ~/ros2_ws/src/zlac8015d_hardware
+git pull --ff-only origin feat/mimo-ladrc-pid-straight-tracking
+python3 -m unittest discover -s tests -p 'test_analyze_current_reversal.py' -v
+python3 tools/analyze_current_reversal.py \
+  ~/ros2_ws/current_step_results/current_reversal_20261113_112805_left.csv \
+  --wheel left
+~~~
+
+この試験では **−1 A指令による制動・逆回転を確認できていない**。370 rpmという設定値に達してもトルク制御で安全に速度が維持されると証明できないため、上限を上げたり無効化して5秒試験を強行しない。
