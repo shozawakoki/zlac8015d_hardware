@@ -21,6 +21,31 @@ namespace mimo
 using Vec2 = std::array<double, 2>;
 using Mat2 = std::array<Vec2, 2>;
 
+// BREAKAWAY is intended to overcome static friction, not to hold an open-loop
+// torque against a wheel that is already rotating. In MIMO torque modes,
+// permit TRACK entry after sustained measured motion in EITHER direction.
+// This lets closed-loop feedback command braking when motion and reference
+// have opposite signs. Legacy per-wheel modes keep direction-specific entry.
+// The caller must require consecutive qualified samples to reject noise.
+inline bool moving_for_track(
+  const double reference_rad_s, const double measured_rad_s,
+  const double threshold_rad_s, const bool mimo_torque_mode)
+{
+  if (!std::isfinite(reference_rad_s) ||
+      !std::isfinite(measured_rad_s) ||
+      !std::isfinite(threshold_rad_s) || threshold_rad_s <= 0.0 ||
+      std::abs(reference_rad_s) <= 1.0e-6)
+  {
+    return false;
+  }
+
+  const double signed_speed =
+    std::copysign(1.0, reference_rad_s) * measured_rad_s;
+  return mimo_torque_mode ?
+    std::abs(measured_rad_s) >= threshold_rad_s :
+    signed_speed >= threshold_rad_s;
+}
+
 inline Vec2 multiply(const Mat2 & m, const Vec2 & v)
 {
   return {m[0][0] * v[0] + m[0][1] * v[1],
