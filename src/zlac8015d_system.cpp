@@ -130,9 +130,14 @@ hardware_interface::CallbackReturn Zlac8015dSystemHardware::on_init(
       control_mode_ = ControlMode::LADRC_TORQUE;
     } else if (mode == "pid_torque") {
       control_mode_ = ControlMode::PID_TORQUE;
+    } else if (mode == "mimo_ladrc_torque") {
+      control_mode_ = ControlMode::MIMO_LADRC_TORQUE;
+    } else if (mode == "mimo_pid_torque") {
+      control_mode_ = ControlMode::MIMO_PID_TORQUE;
     } else {
       throw std::runtime_error(
-        "control_mode must be 'velocity', 'ladrc_torque', or 'pid_torque'");
+        "control_mode must be 'velocity', 'ladrc_torque', 'pid_torque', "
+        "'mimo_ladrc_torque', or 'mimo_pid_torque'");
     }
     pid_kp_ = get_double_parameter(info_, "pid_kp", 0.7);
     pid_ki_ = get_double_parameter(info_, "pid_ki", 0.5);
@@ -144,6 +149,24 @@ hardware_interface::CallbackReturn Zlac8015dSystemHardware::on_init(
     right_ladrc_.b0 = get_double_parameter(info_, "ladrc_b0_right", 1.0);
     controller_bandwidth_ = get_double_parameter(info_, "ladrc_wc", 5.0);
     observer_bandwidth_ = get_double_parameter(info_, "ladrc_wo", 20.0);
+    mimo_wheel_radius_m_ = get_double_parameter(info_, "mimo_wheel_radius", 0.064);
+    mimo_wheel_separation_m_ =
+      get_double_parameter(info_, "mimo_wheel_separation", 0.354);
+    mimo_wc_ = {{
+      get_double_parameter(info_, "mimo_wc_v", controller_bandwidth_),
+      get_double_parameter(info_, "mimo_wc_omega", controller_bandwidth_)}};
+    mimo_wo_ = {{
+      get_double_parameter(info_, "mimo_wo_v", observer_bandwidth_),
+      get_double_parameter(info_, "mimo_wo_omega", observer_bandwidth_)}};
+    mimo_pid_kp_ = {{
+      get_double_parameter(info_, "mimo_pid_kp_v", pid_kp_),
+      get_double_parameter(info_, "mimo_pid_kp_omega", pid_kp_)}};
+    mimo_pid_ki_ = {{
+      get_double_parameter(info_, "mimo_pid_ki_v", pid_ki_),
+      get_double_parameter(info_, "mimo_pid_ki_omega", pid_ki_)}};
+    mimo_pid_kd_ = {{
+      get_double_parameter(info_, "mimo_pid_kd_v", pid_kd_),
+      get_double_parameter(info_, "mimo_pid_kd_omega", pid_kd_)}};
     current_limit_a_ = get_double_parameter(info_, "current_limit_a", 8.0);
     current_rate_limit_a_per_s_ =
       get_double_parameter(info_, "current_rate_limit_a_per_s", 20.0);
@@ -221,6 +244,34 @@ hardware_interface::CallbackReturn Zlac8015dSystemHardware::on_init(
       "Invalid PID gains or derivative filter constant.");
     return hardware_interface::CallbackReturn::ERROR;
   }
+  // Input matrix B=T*diag(b0_left,b0_right), order [left,right].
+  if (!std::isfinite(mimo_wheel_radius_m_) || mimo_wheel_radius_m_ <= 0.0 ||
+      !std::isfinite(mimo_wheel_separation_m_) || mimo_wheel_separation_m_ <= 0.0 ||
+      !std::isfinite(left_ladrc_.b0) || !std::isfinite(right_ladrc_.b0))
+  {
+    RCLCPP_ERROR(rclcpp::get_logger("Zlac8015dSystemHardware"),
+      "Invalid MIMO wheel geometry or nominal b0.");
+    return hardware_interface::CallbackReturn::ERROR;
+  }
+  for (size_t i = 0; i < 2; ++i) {
+    if (!std::isfinite(mimo_wc_[i]) || mimo_wc_[i] <= 0.0 ||
+        !std::isfinite(mimo_wo_[i]) || mimo_wo_[i] <= 0.0 ||
+        !std::isfinite(mimo_pid_kp_[i]) || mimo_pid_kp_[i] < 0.0 ||
+        !std::isfinite(mimo_pid_ki_[i]) || mimo_pid_ki_[i] < 0.0 ||
+        !std::isfinite(mimo_pid_kd_[i]) || mimo_pid_kd_[i] < 0.0 ||
+        (mimo_pid_kp_[i] + mimo_pid_ki_[i] + mimo_pid_kd_[i]) <= 0.0)
+    {
+      RCLCPP_ERROR(rclcpp::get_logger("Zlac8015dSystemHardware"),
+        "Invalid MIMO LADRC / PID gains.");
+      return hardware_interface::CallbackReturn::ERROR;
+    }
+  }
+  mimo_model_ = mimo::DifferentialDriveModel(
+    mimo_wheel_radius_m_, mimo_wheel_separation_m_,
+    left_ladrc_.b0, right_ladrc_.b0);
+  mimo_ladrc_.reset();
+  mimo_pid_.reset();
+  mimo_was_ready_ = false;
   raw_position_left_ = 0;
   raw_position_right_ = 0;
   last_raw_position_left_ = 0;
@@ -240,7 +291,10 @@ hardware_interface::CallbackReturn Zlac8015dSystemHardware::on_init(
     rclcpp::get_logger("Zlac8015dSystemHardware"),
     "Configured mode=%s, CAN=%s, node=%u, wc=%.3f, wo=%.3f, Imax=%.3f A",
     control_mode_ == ControlMode::VELOCITY ? "velocity" :
-      (control_mode_ == ControlMode::PID_TORQUE ? "pid_torque" : "ladrc_torque"),
+      (control_mode_ == ControlMode::PID_TORQUE ? "pid_torque" :
+         control_mode_ == ControlMode::MIMO_LADRC_TORQUE ? "mimo_ladrc_torque" :
+         control_mode_ == ControlMode::MIMO_PID_TORQUE ? "mimo_pid_torque" :
+         "ladrc_torque"),
     can_interface_.c_str(),
     static_cast<unsigned>(node_id_),
     controller_bandwidth_, observer_bandwidth_, current_limit_a_);
@@ -332,6 +386,9 @@ hardware_interface::CallbackReturn Zlac8015dSystemHardware::on_activate(
   left_pid_ = PidState{};
   right_pid_ = PidState{};
   sync_track_count_ = 0;
+  mimo_ladrc_.reset();
+  mimo_pid_.reset();
+  mimo_was_ready_ = false;
   normal_stop_ramp_active_ = false;
   normal_stop_ref_left_ = 0.0;
   normal_stop_ref_right_ = 0.0;
@@ -437,7 +494,10 @@ hardware_interface::CallbackReturn Zlac8015dSystemHardware::on_activate(
     rclcpp::get_logger("Zlac8015dSystemHardware"),
     "Activated %s mode. TPDO event timer: velocity/current=10, position=40.",
     control_mode_ == ControlMode::VELOCITY ? "velocity" :
-      (control_mode_ == ControlMode::PID_TORQUE ? "PID torque" : "LADRC torque"));
+      (control_mode_ == ControlMode::PID_TORQUE ? "PID torque" :
+         control_mode_ == ControlMode::MIMO_LADRC_TORQUE ? "MIMO LADRC torque" :
+         control_mode_ == ControlMode::MIMO_PID_TORQUE ? "MIMO PID torque" :
+         "LADRC torque"));
 
   if (control_mode_ == ControlMode::LADRC_TORQUE) {
     RCLCPP_INFO(
@@ -446,7 +506,8 @@ hardware_interface::CallbackReturn Zlac8015dSystemHardware::on_activate(
       left_ladrc_.b0, right_ladrc_.b0,
       controller_bandwidth_, observer_bandwidth_,
       current_limit_a_, current_rate_limit_a_per_s_);
-  } else if (control_mode_ == ControlMode::PID_TORQUE) {
+  } else if (control_mode_ == ControlMode::PID_TORQUE ||
+             control_mode_ == ControlMode::MIMO_PID_TORQUE) {
     RCLCPP_INFO(rclcpp::get_logger("Zlac8015dSystemHardware"),
       "PID: Kp=%.3f Ki=%.3f Kd=%.3f tau=%.3f s Imax=%.2f A",
       pid_kp_, pid_ki_, pid_kd_, pid_derivative_filter_tau_s_, current_limit_a_);
