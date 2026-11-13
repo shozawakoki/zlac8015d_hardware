@@ -264,3 +264,25 @@ python3 tools/current_step_test.py \
 設定可能な開始前監視パラメータ：\`--settle-seconds\`（連続安定確認時間）、\`--settle-timeout-seconds\`（上限時間）、\`--settle-max-rpm\`（速度閾値）、\`--settle-max-current-a\`（6077h閾値）。緩い設定へ変更して試験を強行しない。
 
 試験を再開する前に、物理的な固定・車輪接触状態・配線・ブレーキ・電源・安全停止が確認され、再試験の過速度発生原因を特定すること。この開始前インターロックは回転中の加速異常を防止するものではなく、非常停止に代わらない。
+
+
+## 2026-11-13：旧ログ3本の共通時間窓比較（実機駆動なし）
+
+1.0 A指令の初回と再試験では、0～0.14秒の実電流フィードバック平均が0.2107 Aと0.6107 A、角加速度が7.534 rad/s²と47.105 rad/s²と大きく異なった。再試験では62.5 rpmで速度監視が作動している。静止・電流安定の「連続1秒間」確認は**これら旧ログには存在しない**。
+
+追加した tools/compare_current_step_trials.py は、過去のCSVを読み取る**オフライン専用**の解析であり、CANソケットを開かない。入力期間を同じ0～0.14秒に揃えて、毎TPDOの電流/速度サンプル、CSV内の送信側電流値、最大CANフィードバック受信間隔、回転速度10/30 rpm到達時刻、車輪角速度の最小二乗回帰加速度を比較する。次のコマンドに --execute はない。
+
+~~~bash
+cd ~/ros2_ws/src/zlac8015d_hardware
+git pull --ff-only origin feat/mimo-ladrc-pid-straight-tracking
+
+python3 -m unittest discover -s tests -p 'test_compare_current_step_trials.py' -v
+
+python3 tools/compare_current_step_trials.py \
+  ~/ros2_ws/current_step_results/current_steps_20261113_081944_left.csv \
+  ~/ros2_ws/current_step_results/current_steps_20261113_074449_left.csv \
+  ~/ros2_ws/current_step_results/current_1A_repeat_20261113_083103.csv \
+  --wheel left --window 0.14 --bin-s 0.02
+~~~
+
+解釈時の注意点：旧CSV内の driver_left_mA は**送信プログラム側の値**であり、CAN受信ACKではない。各行の実速度は event=velocity_rx、電流は event=current_rx のみを採用する。6077h は内部フィードバック（0.1 A単位）であり、独立したモータ相電流測定ではない。前回の過速度発生を説明できるまでは追加の開ループ通電を行わない。
