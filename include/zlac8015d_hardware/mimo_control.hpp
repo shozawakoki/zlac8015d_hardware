@@ -8,6 +8,7 @@
 
 #include <array>
 #include <algorithm>
+#include <cstddef>
 #include <cmath>
 #include <stdexcept>
 
@@ -98,7 +99,7 @@ public:
   {
     if (!initialized) {reset_to_measurement(measured);}
     const Vec2 known_acceleration = multiply(model.B, previous_current);
-    for (size_t i = 0; i < 2; ++i) {
+    for (std::size_t i = 0; i < 2; ++i) {
       const double error = measured[i] - z1[i];
       const double z1_dot = z2[i] + known_acceleration[i] + 2.0 * wo[i] * error;
       const double z2_dot = wo[i] * wo[i] * error;
@@ -106,7 +107,7 @@ public:
       z2[i] += dt * z2_dot;
     }
     Vec2 desired_acceleration{};
-    for (size_t i = 0; i < 2; ++i) {
+    for (std::size_t i = 0; i < 2; ++i) {
       desired_acceleration[i] =
         acceleration_feedforward[i] + wc[i] * (reference[i] - z1[i]) - z2[i];
     }
@@ -148,7 +149,7 @@ public:
     }
     const double alpha = dt / (derivative_tau + dt);
     Vec2 error{};
-    for (size_t i = 0; i < 2; ++i) {
+    for (std::size_t i = 0; i < 2; ++i) {
       error[i] = reference[i] - measured[i];
       const double derivative = (measured[i] - previous_measured[i]) / dt;
       filtered_derivative[i] += alpha * (derivative - filtered_derivative[i]);
@@ -156,7 +157,7 @@ public:
     previous_measured = measured;
     const auto calculate = [&](const Vec2 & integ) -> Vec2 {
       Vec2 virtual_acceleration{};
-      for (size_t i = 0; i < 2; ++i) {
+      for (std::size_t i = 0; i < 2; ++i) {
         virtual_acceleration[i] = model.nominal_b *
           (kp[i] * error[i] + ki[i] * integ[i] - kd[i] * filtered_derivative[i]) +
           acceleration_feedforward[i];
@@ -170,7 +171,7 @@ public:
         std::abs(candidate[0]) < current_limit &&
         std::abs(candidate[1]) < current_limit)
     {
-      for (size_t i = 0; i < 2; ++i) {
+      for (std::size_t i = 0; i < 2; ++i) {
         integral_error[i] += error[i] * dt;
       }
     }
