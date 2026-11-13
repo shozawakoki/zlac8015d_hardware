@@ -1055,7 +1055,7 @@ hardware_interface::return_type Zlac8015dSystemHardware::write(
      SYNC_REF_DIFF_TOL_RAD_S);
 
   const bool sync_eligible =
-    straight_command &&
+    !mimo_mode && straight_command &&
     !normal_stop_ramp_active_ &&
     !zero_stop_hold_ &&
     left_ladrc_.tracking &&
@@ -1114,13 +1114,77 @@ hardware_interface::return_type Zlac8015dSystemHardware::write(
     sync_track_count_ = 0;
   }
 
+  // Apply the coupled controller only when both wheel state machines have
+  // completed BREAKAWAY. Retain the original start/stall/stop handling.
+  const bool mimo_ready =
+    mimo_mode && left_ladrc_.tracking && right_ladrc_.tracking &&
+    std::abs(ladrc_ref_l) > 1.0e-6 && std::abs(ladrc_ref_r) > 1.0e-6 &&
+    !left_ladrc_.stall_lockout && !right_ladrc_.stall_lockout;
+  mimo::Vec2 mimo_raw{{0.0, 0.0}};
+  if (!mimo_ready) {
+    mimo_ladrc_.reset();
+    mimo_pid_.reset();
+    mimo_was_ready_ = false;
+  } else {
+    const mimo::Vec2 measured_body =
+      mimo_model_.wheel_to_body({{hw_velocities_[0], hw_velocities_[1]}});
+    const mimo::Vec2 reference_body =
+      mimo_model_.wheel_to_body({{ladrc_ref_l, ladrc_ref_r}});
+    const mimo::Vec2 previous_current =
+      {{current_l_measured, current_r_measured}};
+    if (!mimo_was_ready_) {
+      mimo_ladrc_.reset_to_measurement(measured_body);
+      mimo_pid_.reset();
+      mimo_was_ready_ = true;
+    }
+
+    // Existing normal-stop acceleration feedforward, converted from wheel
+    // angular-acceleration coordinates to the body frame via T.
+    constexpr double STOP_DECEL_RAD_S2 = 15.625;
+    const mimo::Vec2 wheel_acceleration_ff = {{
+      normal_stop_ramp_active_ ?
+        -std::copysign(STOP_DECEL_RAD_S2, ladrc_ref_l) : 0.0,
+      normal_stop_ramp_active_ ?
+        -std::copysign(STOP_DECEL_RAD_S2, ladrc_ref_r) : 0.0}};
+    const mimo::Vec2 body_acceleration_ff =
+      mimo_model_.wheel_to_body(wheel_acceleration_ff);
+
+    if (control_mode_ == ControlMode::MIMO_LADRC_TORQUE) {
+      mimo_raw = mimo_ladrc_.step(
+        mimo_model_, reference_body, measured_body, previous_current,
+        dt, mimo_wc_, mimo_wo_, body_acceleration_ff);
+      // Maintain wheel-coordinate ESO diagnostics in the existing CSV.
+      const auto estimated_wheels =
+        mimo_model_.body_to_wheel(mimo_ladrc_.z1);
+      const auto estimated_wheel_disturbance =
+        mimo_model_.body_to_wheel(mimo_ladrc_.z2);
+      left_ladrc_.z1 = estimated_wheels[0];
+      right_ladrc_.z1 = estimated_wheels[1];
+      left_ladrc_.z2 = estimated_wheel_disturbance[0];
+      right_ladrc_.z2 = estimated_wheel_disturbance[1];
+    } else {
+      mimo_raw = mimo_pid_.step(
+        mimo_model_, reference_body, measured_body, dt,
+        mimo_pid_kp_, mimo_pid_ki_, mimo_pid_kd_,
+        pid_derivative_filter_tau_s_, current_limit_a_,
+        body_acceleration_ff, !normal_stop_ramp_active_);
+      // No LESO in PID mode; logged body values are measurements only.
+      mimo_ladrc_.z1 = measured_body;
+      mimo_ladrc_.z2 = {{0.0, 0.0}};
+      left_ladrc_.z1 = hw_velocities_[0];
+      right_ladrc_.z1 = hw_velocities_[1];
+      left_ladrc_.z2 = 0.0;
+      right_ladrc_.z2 = 0.0;
+    }
+  }
+
   double cmd_current_l = compute_current_command(
     left_ladrc_, left_pid_,
     ladrc_ref_l,
     hw_velocities_[0],
     current_l_measured,
     dt,
-    allow_independent_track);
+    allow_independent_track, mimo_ready, mimo_raw[0]);
 
   double cmd_current_r = compute_current_command(
     right_ladrc_, right_pid_,
@@ -1128,7 +1192,7 @@ hardware_interface::return_type Zlac8015dSystemHardware::write(
     hw_velocities_[1],
     current_r_measured,
     dt,
-    allow_independent_track);
+    allow_independent_track, mimo_ready, mimo_raw[1]);
 
   // 0.30 rad/s for 100 ms = 20 samples @ 200 Hz.
   constexpr int COORDINATED_START_SAMPLES = 5;
@@ -1285,7 +1349,8 @@ hardware_interface::return_type Zlac8015dSystemHardware::write(
     RCLCPP_INFO(
       rclcpp::get_logger("Zlac8015dSystemHardware"),
       "%s ref[L,R]=[%.2f, %.2f] rad/s vel=[%.2f, %.2f] A_cmd=[%.2f, %.2f] A_actual=[%.2f, %.2f] z2=[%.2f, %.2f]",
-      control_mode_ == ControlMode::PID_TORQUE ? "PID" : "LADRC",
+      (control_mode_ == ControlMode::PID_TORQUE ||
+        control_mode_ == ControlMode::MIMO_PID_TORQUE) ? "PID" : "LADRC",
       hw_commands_[0], hw_commands_[1],
       hw_velocities_[0], hw_velocities_[1],
       cmd_current_l, cmd_current_r,
@@ -1303,7 +1368,9 @@ double Zlac8015dSystemHardware::compute_current_command(
   const double velocity_measured,
   const double current_measured,
   const double dt,
-  const bool allow_track_transition)
+  const bool allow_track_transition,
+  const bool use_mimo_raw,
+  const double mimo_raw_current)
 {
 
   constexpr double REF_ZERO = 1.0e-6;
@@ -1493,7 +1560,12 @@ double Zlac8015dSystemHardware::compute_current_command(
   // TRACK: select LADRC or PID. Share output limits, hold and stall.
   // ==========================================================
   double raw_current_request = 0.0;
-  if (control_mode_ == ControlMode::LADRC_TORQUE) {
+  if (use_mimo_raw) {
+    // Current clamping, slew-rate, direction-aware floor and stall recovery
+    // below remain shared with the legacy controller.
+    raw_current_request = mimo_raw_current;
+  } else if (control_mode_ == ControlMode::LADRC_TORQUE ||
+             control_mode_ == ControlMode::MIMO_LADRC_TORQUE) {
   // ==========================================================
   // TRACK: LESO
   // ==========================================================
