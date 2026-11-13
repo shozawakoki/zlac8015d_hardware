@@ -79,7 +79,7 @@ def summarize(rows):
     return [
         describe(related, "All composite"),
         describe([r for r in related if r["both_track"]], "Both TRACK"),
-        describe([r for r in related if not r["both_track"]], "Any BREAKAWAY"),
+        describe([r for r in related if not r["both_track"]], "Not both TRACK"),
         describe([r for r in related if r["saturated"]], "Saturated subset"),
         describe([r for r in related if r["overspeed"]], "Overspeed subset"),
     ]
@@ -132,7 +132,7 @@ def main(argv=None):
     file=Path(args.csv_file).expanduser()
     with file.open(newline="",encoding="utf-8") as f:
         reader=csv.DictReader(f)
-        absent=set(REQUIRED)|{"time_s"}-set(reader.fieldnames or [])
+        absent=(set(REQUIRED)|{"time_s"})-set(reader.fieldnames or [])
         if absent:
             p.error("Missing CSV fields: "+", ".join(sorted(absent)))
         records=list(reader)
