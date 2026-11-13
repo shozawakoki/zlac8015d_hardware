@@ -2,6 +2,7 @@
 #define ZLAC8015D_SYSTEM_HPP_
 
 #include <chrono>
+#include "zlac8015d_hardware/mimo_control.hpp"
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -80,7 +81,9 @@ private:
   {
     VELOCITY,
     LADRC_TORQUE,
-    PID_TORQUE
+    PID_TORQUE,
+    MIMO_LADRC_TORQUE,
+    MIMO_PID_TORQUE
   };
 
   // CAN socket / CANopen configuration
@@ -102,7 +105,9 @@ private:
     double velocity_measured,
     double current_measured,
     double dt,
-    bool allow_track_transition);
+    bool allow_track_transition,
+    bool use_mimo_raw,
+    double mimo_raw_current);
   static double clamp(double value, double lower, double upper);
 
   // ros2_control command / state
@@ -117,6 +122,18 @@ private:
   LadrcState right_ladrc_;
   PidState left_pid_;
   PidState right_pid_;
+  // Two-input/two-output controllers operating in body coordinates [v, yaw_rate].
+  mimo::DifferentialDriveModel mimo_model_{0.064, 0.354, 18.0, 18.0};
+  mimo::Ladrc mimo_ladrc_;
+  mimo::Pid mimo_pid_;
+  bool mimo_was_ready_{false};
+  double mimo_wheel_radius_m_{0.064};
+  double mimo_wheel_separation_m_{0.354};
+  mimo::Vec2 mimo_wc_{{5.0, 5.0}};
+  mimo::Vec2 mimo_wo_{{20.0, 20.0}};
+  mimo::Vec2 mimo_pid_kp_{{0.7, 0.7}};
+  mimo::Vec2 mimo_pid_ki_{{0.5, 0.5}};
+  mimo::Vec2 mimo_pid_kd_{{0.03, 0.03}};
   double pid_kp_{0.7};  // [A/(rad/s)]
   double pid_ki_{0.5};  // [A/rad]
   double pid_kd_{0.03}; // [A*s/rad]
