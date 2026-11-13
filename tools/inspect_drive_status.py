@@ -75,6 +75,12 @@ def main():
         ("CiA402 statusword right (if supported)", 0x6041, 2),
         ("Mode of operation display", 0x6061, 0),
         ("Error code", 0x603F, 0),
+        ("Configured rated current left [0.1 A]", 0x2014, 1),
+        ("Configured rated current right [0.1 A]", 0x2014, 2),
+        ("Configured max current left [0.1 A]", 0x2015, 1),
+        ("Configured max current right [0.1 A]", 0x2015, 2),
+        ("Torque slope left (vendor units)", 0x6087, 1),
+        ("Torque slope right (vendor units)", 0x6087, 2),
         ("Target current left (if readable)", 0x6071, 1),
         ("Target current right (if readable)", 0x6071, 2),
         ("Actual current left (if readable)", 0x6077, 1),
@@ -102,6 +108,8 @@ def main():
                         extra += " [NOT BOTH OPERATION ENABLED]"
                 elif index == 0x6061:
                     extra = f" => {'Profile Torque' if value == 4 else 'NOT Profile Torque'}"
+                elif index in (0x2014, 0x2015):
+                    extra = f" => {value / 10.0:.1f} A (configured, not an independent rating check)"
                 elif index == 0x603F and value:
                     extra = " => DRIVE ERROR REPORTED"
                 print(f"{name}  {label}: {value} (0x{value:X}){extra}")
