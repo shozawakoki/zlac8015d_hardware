@@ -34,12 +34,13 @@ def parse_num(row, field):
         return None
 
 
-def analyze_row(row, wc, gain, min_v):
+def analyze_row(row, wc, gain, min_v, min_omega=0.1):
     v = {name: parse_num(row, name) for name in REQUIRED}
     if any(n is None for n in v.values()):
         return None
     t = v["time_s"]
     if (abs(v["ref_v_m_s"]) < min_v or
+            abs(v["ref_omega_rad_s"]) < min_omega or
             v["tracking_left"] != 1 or v["tracking_right"] != 1 or
             abs(v["ref_left_rad_s"]) <= 1e-6 or
             abs(v["ref_right_rad_s"]) <= 1e-6):
@@ -122,9 +123,10 @@ def main(argv=None):
     p.add_argument("--wheel-radius",type=float,default=.064)
     p.add_argument("--wheel-separation",type=float,default=.354)
     p.add_argument("--min-v",type=float,default=.05)
+    p.add_argument("--min-omega",type=float,default=.1)
     p.add_argument("--output",help="binned report CSV")
     args=p.parse_args(argv)
-    for name in ("wc_omega","b0","wheel_radius","wheel_separation","bin_s","min_v"):
+    for name in ("wc_omega","b0","wheel_radius","wheel_separation","bin_s","min_v","min_omega"):
         v=getattr(args,name)
         if not math.isfinite(v) or v<=0:
             p.error(f"--{name.replace('_','-')} must be finite positive")
@@ -138,7 +140,7 @@ def main(argv=None):
         if missing:
             p.error("missing CSV fields: "+", ".join(missing))
         raw=list(reader)
-    data=[analyze_row(r,args.wc_omega,gain,args.min_v) for r in raw]
+    data=[analyze_row(r,args.wc_omega,gain,args.min_v,args.min_omega) for r in raw]
     data=[r for r in data if r is not None]
     if not data:
         p.error("No suitable both-TRACK, moving MIMO samples in CSV")
