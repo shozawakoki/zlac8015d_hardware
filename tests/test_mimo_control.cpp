@@ -75,6 +75,8 @@ int main()
     model, zero, zero, 0.005, zero, zero, d_gain, 0.05, 8.0,
     zero, true, t0);
   assert(close(sampled_pid.filtered_derivative[0], 0.0));
+  assert(!sampled_pid.derivative_updated);
+  assert(close(sampled_pid.derivative_sample_dt_s, 0.0));
   const Vec2 first_sample{{0.010, 0.020}};
   // A 200 Hz controller tick without a CAN sample must not update D.
   (void)sampled_pid.step(
@@ -88,11 +90,15 @@ int main()
     zero, true, t0 + Ms(10));
   assert(close(sampled_pid.filtered_derivative[0], 1.0 / 6.0));
   assert(close(sampled_pid.filtered_derivative[1], 2.0 / 6.0));
+  assert(sampled_pid.derivative_updated);
+  assert(close(sampled_pid.derivative_sample_dt_s, 0.010));
   // A repeated controller step with the same TPDO0 timestamp holds D.
   (void)sampled_pid.step(
     model, zero, first_sample, 0.005, zero, zero, d_gain, 0.05, 8.0,
     zero, true, t0 + Ms(10));
   assert(close(sampled_pid.filtered_derivative[0], 1.0 / 6.0));
+  assert(!sampled_pid.derivative_updated);
+  assert(close(sampled_pid.derivative_sample_dt_s, 0.0));
   // A new TPDO0 frame with identical speed is still a new sample:
   // D input is zero, the low-pass derivative decays.
   (void)sampled_pid.step(
@@ -100,18 +106,22 @@ int main()
     zero, true, t0 + Ms(20));
   assert(close(sampled_pid.filtered_derivative[0], 5.0 / 36.0));
   assert(close(sampled_pid.filtered_derivative[1], 10.0 / 36.0));
+  assert(sampled_pid.derivative_updated);
+  assert(close(sampled_pid.derivative_sample_dt_s, 0.010));
   // Bursts less than 1 ms apart are rejected, preserving the baseline.
   const Vec2 burst_sample{{0.050, 0.050}};
   (void)sampled_pid.step(
     model, zero, burst_sample, 0.005, zero, zero, d_gain, 0.05, 8.0,
     zero, true, t0 + Ms(20) + std::chrono::microseconds(100));
   assert(close(sampled_pid.filtered_derivative[0], 5.0 / 36.0));
+  assert(!sampled_pid.derivative_updated);
   // After a long gap, the derivative resets instead of a large D kick.
   (void)sampled_pid.step(
     model, zero, burst_sample, 0.005, zero, zero, d_gain, 0.05, 8.0,
     zero, true, t0 + Ms(300));
   assert(close(sampled_pid.filtered_derivative[0], 0.0));
   assert(close(sampled_pid.filtered_derivative[1], 0.0));
+  assert(!sampled_pid.derivative_updated);
   sampled_pid.reset();
   assert(!sampled_pid.initialized);
   assert(close(sampled_pid.filtered_derivative[0], 0.0));
