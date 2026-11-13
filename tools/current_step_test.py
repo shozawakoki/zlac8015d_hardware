@@ -271,12 +271,12 @@ class ZlacCurrentTester:
             self.process_feedback(item, log=False)
         raise TimeoutError(f"No SDO ACK for {idx:04X}:{sub:02X}")
 
-    def sdo_read(self, idx, sub):
+    def sdo_read(self, idx, sub, timeout_s=0.5):
         # Read-only expedited SDO upload, used to VERIFY servo state before
         # applying a non-zero RPDO current (SDO write ACK alone is insufficient).
         req = bytes([0x40, idx & 255, idx >> 8, sub, 0, 0, 0, 0])
         self.send(0x600 + self.node, req)
-        deadline = time.monotonic() + 0.5
+        deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
             if STOP:
                 raise InterruptedError("User interruption")
@@ -303,9 +303,12 @@ class ZlacCurrentTester:
     def read_target_during_motion(self):
         # Only called from --probe-target, while the nonzero current is active.
         # SDO uploads are read-only; raw target values are in driver-side mA.
-        status = self.sdo_read(0x6041, 0)
-        left_raw = self.sdo_read(0x6071, 1)
-        right_raw = self.sdo_read(0x6071, 2)
+        # Do not keep a nonzero current alive through three 0.5 s SDO timeouts.
+        # An unavailable register should abort rapidly and trigger zero current
+        # in main()'s finally block.
+        status = self.sdo_read(0x6041, 0, timeout_s=0.08)
+        left_raw = self.sdo_read(0x6071, 1, timeout_s=0.08)
+        right_raw = self.sdo_read(0x6071, 2, timeout_s=0.08)
         # ZLAC8015D V4 6041h: high16=LEFT, low16=RIGHT.
         self.readback_status_l = (status >> 16) & 0xFFFF
         self.readback_status_r = status & 0xFFFF
