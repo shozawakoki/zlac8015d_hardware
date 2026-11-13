@@ -97,8 +97,15 @@ class ReversalTests(unittest.TestCase):
 
     def test_reject_unbounded_speed(self):
         args = self.parse("--max-speed-rpm", "120")
-        with self.assertRaisesRegex(ValueError, "speed cutoff"):
+        with self.assertRaisesRegex(ValueError, "verified-safe-rpm"):
             rev.preflight(args)
+
+    def test_above_60_requires_actual_verified_rating(self):
+        args = self.parse("--max-speed-rpm", "120", "--verified-safe-rpm", "100")
+        with self.assertRaisesRegex(ValueError, "verified-safe-rpm"):
+            rev.preflight(args)
+        args = self.parse("--max-speed-rpm", "120", "--verified-safe-rpm", "150")
+        self.assertFalse(rev.preflight(args))
 
     def test_live_requires_regeneration_approval(self):
         args = self.parse("--execute")
