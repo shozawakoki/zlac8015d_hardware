@@ -147,7 +147,7 @@ python3 ~/ros2_ws/src/zlac8015d_hardware/tools/analyze_current_step.py "$LATEST"
 
 `tools/current_step_test.py` は、ゼロ電流指令での初期化後に以下を**SDOで読み戻す**ように変更した。
 
-- `6041h:00` Statusword: CiA402の `Operation enabled` を確認（`statusword & 0x006F == 0x0027`）
+- `6041h:00` Statusword: 32ビットの上下16ビットを個別に分解し、**両モータ**の `Operation enabled` を確認（それぞれ `statusword16 & 0x006F == 0x0027`）
 - `6061h:00` Mode display: `4`（Profile Torque）を確認
 - 有効状態またはモードが違う場合、**非ゼロの電流ステップへ進まず中断**
 - 1 A以上の指令を出し、約0.75秒間、実電流が0.2 A未満かつ車輪速度が1 rpm未満のままであれば中断
