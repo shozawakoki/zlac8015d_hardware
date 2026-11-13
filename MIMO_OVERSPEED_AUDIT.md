@@ -33,3 +33,20 @@ fi
 注意：mimo_readyの専用ログは存在しない。片輪目標ゼロ・TRACKフラグから切替の可能性を調べるものであり、断定はできない。また一瞬の電流指令と速度誤差の符号不一致は、外乱補償や加速度フィードフォワードの可能性もあり、制御則の誤りとは断定できない。
 
 新たな開ループ電流試験やMIMOの実機再走行は、既存ログを確認するまでは実施しない。
+
+## 追加：連続飽和区間を0.1秒ごとに解析
+
+既存の解析で 22.634〜24.193 s に約1.56秒の連続飽和が見つかった場合は、次の追跡解析を実行する。ROSやCANを起動しないオフライン処理である。
+
+```bash
+cd ~/ros2_ws/src/zlac8015d_hardware
+git pull --ff-only origin feat/mimo-ladrc-pid-straight-tracking
+python3 -m unittest discover -s tests -p 'test_analyze_mimo_focus.py' -v
+python3 tools/analyze_mimo_focus.py \
+  ~/ros2_ws/mimo_results/mimo_ladrc_original.csv \
+  --start 22.5 --end 24.3 --bin-s 0.1 --limit-a 2.0
+```
+
+全複合運動のTRACK可否による飽和率・車輪速度超過率を比較する。指定区間では0.1秒ごとに車体目標/実速度、左右指令/実電流、飽和率、TRACK率、車輪速度超過率、速度超過中に加速方向または制動方向の**指令**を出した率を表示し、対応するCSVを保存する。
+
+「加速方向/制動方向」は電流指令と実際の車輪速度の符号から分類したもので、ドライバが発生した物理トルクの独立計測ではない。ブレーキ指令が出ていても電流フィードバックの反転に時間がかかる可能性がある。複合運動時のmimo_readyそのものは既存ログに含まれないため、TRACKの組合せだけでは正確な切替履歴は分からない。
