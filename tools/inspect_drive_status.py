@@ -81,6 +81,15 @@ def main():
         ("Configured max current right [0.1 A]", 0x2015, 2),
         ("Torque slope left (vendor units)", 0x6087, 1),
         ("Torque slope right (vendor units)", 0x6087, 2),
+        ("Current-loop proportional gain left", 0x2019, 1),
+        ("Current-loop proportional gain right", 0x2019, 2),
+        ("Current-loop integral gain left", 0x201A, 1),
+        ("Current-loop integral gain right", 0x201A, 2),
+        ("Feedforward smoothing left", 0x201B, 1),
+        ("Feedforward smoothing right", 0x201B, 2),
+        ("Torque output smoothing left", 0x201C, 1),
+        ("Torque output smoothing right", 0x201C, 2),
+        ("DC bus voltage [0.01 V]", 0x2035, 0),
         ("Target current left (if readable)", 0x6071, 1),
         ("Target current right (if readable)", 0x6071, 2),
         ("Actual current left (if readable)", 0x6077, 1),
@@ -110,6 +119,8 @@ def main():
                     extra = f" => {'Profile Torque' if value == 4 else 'NOT Profile Torque'}"
                 elif index in (0x2014, 0x2015):
                     extra = f" => {value / 10.0:.1f} A (configured, not an independent rating check)"
+                elif index == 0x2035:
+                    extra = f" => {value / 100.0:.2f} V"
                 elif index == 0x603F and value:
                     extra = " => DRIVE ERROR REPORTED"
                 print(f"{name}  {label}: {value} (0x{value:X}){extra}")
