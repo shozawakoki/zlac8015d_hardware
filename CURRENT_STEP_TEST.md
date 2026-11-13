@@ -165,6 +165,41 @@ python3 tools/inspect_drive_status.py --interface can0 --node-id 1
 
 また、電流ステップログの**最後の約1秒間**は停止後のゼロ電流期間である。従来の分析器はこれを最終ステップへ混ぜ、MAEが不当に低下していた。修正版の `analyze_current_step.py` は `complete_zero` 以降をステップごとの統計から除外する。
 
+## 電流指令が非ゼロでも実電流0 A・回転速度0 rpmの場合の6071h印加中診断
+
+通常の `tools/inspect_drive_status.py` は安全な**試験終了後**の読み出しなので、`6071h` は0に戻っており、運転中の指令受理は判断できない。
+
+追加の `--probe-target` は、**1つの短い電流ステップ**を送信して約0.15秒後、まだ電流指令が有効な間に、左右の `6071h:01/:02` と `6041h:00` をSDOで読み戻す。その後0 Aを送信して終了する。ドライバの実電流 `6077h` と車輪速度 `606Ch` も従来どおりTPDOから記録する。
+
+~~~bash
+# 実機を浮かせて固定し、独立した非常停止を確保すること。
+# ROS 2 / CAN監視自動再起動 / 他のCAN制御プログラムは停止済みとする。
+cd ~/ros2_ws/src/zlac8015d_hardware
+
+python3 tools/current_step_test.py \
+  --execute \
+  --probe-target \
+  --wheel left \
+  --profile "1.0" \
+  --step-seconds 1 \
+  --max-current-a 1.0 \
+  --max-speed-rpm 120 \
+  --confirm-rated-current \
+  --confirm-wheels-raised \
+  --confirm-e-stop \
+  --confirm-exclusive-can
+~~~
+
+期待ログ：`ACTIVE READBACK: cmd left/right=...; 6071 target left/right=...; actual left/right=...; status left/right=...`。CSVには `event=active_target_readback`、`readback_left_A`、`readback_right_A`、`statusword_left`、`statusword_right` を追加した。値の符号は左輪もROS前進方向に統一する。
+
+判断：
+
+- `6071h` の左輪読戻値が指令値 `+1 A` と異なる／0 Aのまま：RPDO転送、マッピング、ドライバ側指令更新条件等を調査
+- `6071h` がほぼ `+1 A` だが実電流 `6077h` は0 A：目標値はドライバ内部に入っているが、モータ電流が流れない原因（駆動有効状態、配線、電源・制限、ドライバ内部制御等）を調査
+- `6071h` と実電流がともに指令に追従するが速度0 rpm：摩擦や駆動系の拘束も含めて検証
+
+`--probe-target` が確認するのはドライバの**オブジェクト読み戻し値**である。実際にコイルへ供給された電流を独立に計測したものではない。また、CANの受信遅延やSDO読戻し時間を含むため厳密な15/100秒のパルスにはならず、ソフトウェア停止と物理的非常停止は同等ではない。
+
 ## 原因切り分けの観点
 
 - **指令と実電流が大きく異なる：** CAN符号/単位、モータドライバの内部電流制御、電流制限、電源、通信・更新周期などを調査する
