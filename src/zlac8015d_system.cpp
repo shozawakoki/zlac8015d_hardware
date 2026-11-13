@@ -1178,6 +1178,17 @@ hardware_interface::return_type Zlac8015dSystemHardware::write(
     }
   }
 
+  // Reject non-finite coupled requests before clamping and packing into
+  // signed CANopen milliamps (NaN -> integer conversion would be unsafe).
+  if (mimo_ready &&
+      (!std::isfinite(mimo_raw[0]) || !std::isfinite(mimo_raw[1])))
+  {
+    RCLCPP_ERROR(rclcpp::get_logger("Zlac8015dSystemHardware"),
+      "Non-finite MIMO current request; attempting zero current.");
+    send_zero_command();
+    return hardware_interface::return_type::ERROR;
+  }
+
   double cmd_current_l = compute_current_command(
     left_ladrc_, left_pid_,
     ladrc_ref_l,
