@@ -61,3 +61,31 @@ python3 scripts/record_mimo_accel_session.py \
 - 目標角速度に対する実角速度の最大偏差、0到達時間、指令からの遅れ
 
 **未検証：** 本修正による実機の急加速抑制やオーバーシュート低減は、この時点では確定していない。必ずテスト・ビルド・実機ログで確認する。
+
+
+## 旧バイナリによる誤検証の防止：ランタイム識別マーカー
+
+前回の修正後実機ログでは、実車輪速度が十分に高くてもTRACKへの遷移が1.1〜1.3秒遅れ、READY待機電流が2 Aになった。旧ビルドが読み込まれた可能性がある。
+ソースのgit pullだけではインストール済み共有ライブラリは更新されない。
+
+新しいプラグインは起動時に識別メッセージ MIMO_TRANSITION_FIX_20261113_R2 を出力する。
+以下をROS launch停止状態で実行する。
+
+~~~bash
+source /opt/ros/humble/setup.bash
+cd ~/ros2_ws/src/zlac8015d_hardware
+git pull --ff-only origin feat/mimo-ladrc-pid-straight-tracking
+g++ -std=c++17 -Wall -Wextra -pedantic -Iinclude tests/test_mimo_control.cpp -o /tmp/test_mimo_control
+/tmp/test_mimo_control
+cd ~/ros2_ws
+colcon build --packages-select zlac8015d_hardware --symlink-install
+source ~/ros2_ws/install/setup.bash
+LIB="$(ros2 pkg prefix zlac8015d_hardware)/lib/libzlac8015d_hardware.so"
+readlink -f "$LIB"
+sha256sum "$LIB"
+strings "$LIB" | grep -F MIMO_TRANSITION_FIX_20261113_R2
+~~~
+
+識別文字列がなければ再走行せず、ROS overlayとビルドを修正する。文字列がインストール済みライブラリにあるだけでは実際のプロセスに読み込まれた保証にならないため、実際のros_launch.logでも同じマーカーを確認する。
+ログ収集プログラムは実行前にインストール済みライブラリを検査し、バイナリのパスとSHA-256をcapture_metadata.jsonに保存し、終了時に実行プロセス由来のマーカーの有無も報告する。
+最初は車輪を浮かせた低速の方向反転・旋回試験に限定し、停止後にデータを比較する。
