@@ -69,6 +69,7 @@ def main():
     if not 1 <= args.node_id <= 127 or args.timeout <= 0:
         p.error("node-id must be 1..127 and timeout > 0")
     specs = (
+        ("CiA402 controlword (readback if supported)", 0x6040, 0),
         ("CiA402 statusword", 0x6041, 0),
         ("CiA402 statusword left (if supported)", 0x6041, 1),
         ("CiA402 statusword right (if supported)", 0x6041, 2),
