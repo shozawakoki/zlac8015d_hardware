@@ -16,7 +16,7 @@ python3 -m unittest discover -s tests -p 'test_analyze_mimo_overspeed.py' -v
 mkdir -p ~/ros2_ws/mimo_results
 if [ -s /tmp/mimo_ladrc_track_200hz.csv ]; then
   cp /tmp/mimo_ladrc_track_200hz.csv ~/ros2_ws/mimo_results/mimo_ladrc_original.csv
-  python3 tools/analyze_mimo_overspeed.py ~/ros2_ws/mimo_results/mimo_ladrc_original.csv --limit-a 2.0
+  python3 tools/analyze_mimo_overspeed.py ~/ros2_ws/mimo_results/mimo_ladrc_original.csv --limit-a 8.0
 else
   echo '保存済みMIMOログが見つかりません。実機の再走行はせず、以前のCSVを探してください。'
 fi
@@ -34,6 +34,32 @@ fi
 
 新たな開ループ電流試験やMIMOの実機再走行は、既存ログを確認するまでは実施しない。
 
+## 重要：2 Aではなく実際のTRACK上限を使用する（2026-11-13追記）
+
+実測の複合運動ログでは、0.1秒の区間平均電流指令が3～4 Aを超えていた。このため、旧コマンド `--limit-a 2.0` の44.5%「飽和」は実際には **|Icmd|>=1.98 Aを満たすサンプルの割合**であり、最終電流上限の飽和率ではない。
+
+両GitHubリポジトリの `feat/mimo-ladrc-pid-straight-tracking` ブランチを確認すると、bringup側のURDFには `current_limit_a=8.0`、hardware側C++のデフォルトも8.0 A、`breakaway_max_a` のデフォルトは2.0 Aと定義されている。**しかし、実機に読み込ませたURDFや実行バイナリが同一かどうかは未確認**。local/installのURDFを照合する。
+
+```bash
+grep -nE '<param name="(control_mode|current_limit_a|breakaway_max_a|current_rate_limit_a_per_s)"' \
+  ~/ros2_ws/src/zlac8015d_can_bringup/urdf/orange_go_2025.urdf
+
+grep -nE '<param name="(control_mode|current_limit_a|breakaway_max_a|current_rate_limit_a_per_s)"' \
+  ~/ros2_ws/install/zlac_can_bringup/share/zlac_can_bringup/urdf/orange_go_2025.urdf
+
+# 記録時も電流上限が8.0Aだったと確認できた場合にのみ実行
+python3 tools/analyze_mimo_overspeed.py \
+  ~/ros2_ws/mimo_results/mimo_ladrc_original.csv --limit-a 8.0
+
+python3 tools/analyze_mimo_focus.py \
+  ~/ros2_ws/mimo_results/mimo_ladrc_original.csv \
+  --start 22.5 --end 24.3 --bin-s 0.1 --limit-a 8.0
+```
+
+解析器には、CSV中の電流指令の最大値が指定した `--limit-a` を超えていたらエラーで停止する検査を追加した。なお、逆に最大値が設定上限に達していない場合、上限設定値そのものをCSVから推定することはできない。ログ取得時の設定ファイルと照合が必要。
+
+22.5–24.3秒は左右輪が全区間TRACKのため、TRACK/BREAKAWAY切替がこの連続飽和区間の主原因である可能性は低い。角速度偏差と左右指令電流差 `I_R-I_L` を確認する。左/右はROS正方向の電流単位である。符号不一致 `YAWbad` は「角速度偏差の補正方向と指令電流差が反対」という診断フラグに過ぎず、ESO外乱推定や摩擦を含む場合、直ちに制御ミスと判定しない。
+
 ## 追加：連続飽和区間を0.1秒ごとに解析
 
 既存の解析で 22.634〜24.193 s に約1.56秒の連続飽和が見つかった場合は、次の追跡解析を実行する。ROSやCANを起動しないオフライン処理である。
@@ -44,7 +70,7 @@ git pull --ff-only origin feat/mimo-ladrc-pid-straight-tracking
 python3 -m unittest discover -s tests -p 'test_analyze_mimo_focus.py' -v
 python3 tools/analyze_mimo_focus.py \
   ~/ros2_ws/mimo_results/mimo_ladrc_original.csv \
-  --start 22.5 --end 24.3 --bin-s 0.1 --limit-a 2.0
+  --start 22.5 --end 24.3 --bin-s 0.1 --limit-a 8.0
 ```
 
 全複合運動のTRACK可否による飽和率・車輪速度超過率を比較する。指定区間では0.1秒ごとに車体目標/実速度、左右指令/実電流、飽和率、TRACK率、車輪速度超過率、速度超過中に加速方向または制動方向の**指令**を出した率を表示し、対応するCSVを保存する。
