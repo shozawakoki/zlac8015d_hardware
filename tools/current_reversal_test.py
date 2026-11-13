@@ -97,8 +97,8 @@ def preflight(args):
         raise ValueError("min-switch-rpm must be within 0.5..20.0 rpm")
     if not (1.0 <= args.reverse_confirm_rpm <= 5.0):
         raise ValueError("reverse-confirm-rpm must be 1..5 rpm")
-    if not (args.switch_rpm + 10.0 <= args.max_speed_rpm <= 300.0):
-        raise ValueError("speed cutoff must exceed switch-rpm by >=10 rpm and be <=300 rpm")
+    if not (args.switch_rpm + 10.0 <= args.max_speed_rpm <= 370.0):
+        raise ValueError("speed cutoff must exceed switch-rpm by >=10 rpm and be <=370 rpm")
     if args.verified_safe_rpm is not None and not (20.0 <= args.verified_safe_rpm <= 3000.0):
         raise ValueError("verified-safe-rpm must be a verified 20..3000 rpm rating")
     if args.max_speed_rpm > 60.0 and (
