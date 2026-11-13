@@ -128,6 +128,9 @@ public:
   Vec2 filtered_derivative{{0.0, 0.0}};
   Vec2 previous_measured{{0.0, 0.0}};
   std::chrono::steady_clock::time_point previous_sample_time{};
+  // Diagnostics: nonzero only on a cycle that accepted a fresh speed sample.
+  double derivative_sample_dt_s{0.0};
+  bool derivative_updated{false};
   bool initialized{false};
 
   void reset()
@@ -136,6 +139,8 @@ public:
     filtered_derivative = {{0.0, 0.0}};
     previous_measured = {{0.0, 0.0}};
     previous_sample_time = {};
+    derivative_sample_dt_s = 0.0;
+    derivative_updated = false;
     initialized = false;
   }
 
@@ -147,6 +152,8 @@ public:
     const bool enable_integral = true,
     const std::chrono::steady_clock::time_point velocity_sample_time = {})
   {
+    derivative_sample_dt_s = 0.0;
+    derivative_updated = false;
     // P and I continue to run at the controller rate (nominally 200 Hz).
     // D changes only when a *new TPDO0 velocity measurement* was received.
     // velocity_sample_time is updated by read() on every valid TPDO0 frame
@@ -181,6 +188,8 @@ public:
         }
         previous_measured = measured;
         previous_sample_time = velocity_sample_time;
+        derivative_sample_dt_s = sample_dt;
+        derivative_updated = true;
       } else if (!std::isfinite(sample_dt) || sample_dt < 0.0 ||
                  sample_dt > MAX_SAMPLE_DT_S)
       {
