@@ -299,6 +299,18 @@ hardware_interface::CallbackReturn Zlac8015dSystemHardware::on_init(
     static_cast<unsigned>(node_id_),
     controller_bandwidth_, observer_bandwidth_, current_limit_a_);
 
+  // Runtime provenance marker. A source checkout alone does not prove the
+  // installed plugin was rebuilt or loaded. This literal is emitted ONLY
+  // from the active compiled plugin, then archived by the launch recorder.
+  if (control_mode_ == ControlMode::MIMO_LADRC_TORQUE ||
+      control_mode_ == ControlMode::MIMO_PID_TORQUE)
+  {
+    RCLCPP_INFO(
+      rclcpp::get_logger("Zlac8015dSystemHardware"),
+      "MIMO_TRANSITION_FIX_20261113_R2 active: "
+      "direction-independent moving TRACK gate, READY current hold");
+  }
+
   return hardware_interface::CallbackReturn::SUCCESS;
 }
 
