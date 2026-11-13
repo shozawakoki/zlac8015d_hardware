@@ -44,7 +44,11 @@ def parse_args(argv=None):
     p.add_argument("--reverse-confirm-rpm", type=float, default=3.0,
                    help="stop after two fresh feedback frames <= -this value")
     p.add_argument("--max-speed-rpm", type=float, default=45.0,
-                   help="abort on absolute RPM of either wheel, default 45")
+                   help="abort on absolute RPM of either wheel; default 45. >60 requires "
+                        "--verified-safe-rpm")
+    p.add_argument("--verified-safe-rpm", type=float, default=None,
+                   help="documented maximum safe speed of the ACTUAL motor/drive/fixture; "
+                        "required for any cutoff above 60 rpm")
     p.add_argument("--max-forward-s", type=float, default=0.25,
                    help="abort if no forward RPM trigger within this period")
     p.add_argument("--max-reverse-s", type=float, default=None,
@@ -73,6 +77,7 @@ def parse_args(argv=None):
 def preflight(args):
     values = (args.current_a, args.switch_rpm, args.reverse_confirm_rpm,
               args.min_switch_rpm, args.switch_after_s if args.switch_after_s is not None else 0.0,
+              args.verified_safe_rpm if args.verified_safe_rpm is not None else 0.0,
               args.max_speed_rpm, args.max_forward_s, args.max_reverse_s,
               args.loop_hz, args.feedback_timeout_ms, args.settle_seconds,
               args.settle_timeout_seconds, args.settle_max_rpm,
@@ -92,8 +97,16 @@ def preflight(args):
         raise ValueError("min-switch-rpm must be within 0.5..20.0 rpm")
     if not (1.0 <= args.reverse_confirm_rpm <= 5.0):
         raise ValueError("reverse-confirm-rpm must be 1..5 rpm")
-    if not (args.switch_rpm + 10.0 <= args.max_speed_rpm <= 60.0):
-        raise ValueError("speed cutoff must exceed switch-rpm by >=10 rpm and be <=60 rpm")
+    if not (args.switch_rpm + 10.0 <= args.max_speed_rpm <= 300.0):
+        raise ValueError("speed cutoff must exceed switch-rpm by >=10 rpm and be <=300 rpm")
+    if args.verified_safe_rpm is not None and not (20.0 <= args.verified_safe_rpm <= 3000.0):
+        raise ValueError("verified-safe-rpm must be a verified 20..3000 rpm rating")
+    if args.max_speed_rpm > 60.0 and (
+            args.verified_safe_rpm is None or
+            args.max_speed_rpm > args.verified_safe_rpm):
+        raise ValueError(
+            "cutoffs above 60 rpm require --verified-safe-rpm >= --max-speed-rpm; "
+            "confirm documented motor/drive/fixture maximum before running")
     reverse_timeout_cap = 2.0 if args.switch_after_s is not None else 0.8
     if not (0.05 <= args.max_forward_s <= 0.5 and
             0.1 <= args.max_reverse_s <= reverse_timeout_cap):
@@ -121,6 +134,8 @@ def preflight(args):
              f"timed hold={args.switch_after_s:.2f}s, ")
           + f"reverse timeout={args.max_reverse_s:.2f}s")
     print("  Current/velocity TPDO at driver sign-converted ROS-positive coordinates.")
+    if args.verified_safe_rpm is not None:
+        print(f"  operator supplied verified maximum safe speed: {args.verified_safe_rpm:.1f} rpm")
     print("  WARNING: may overspeed or abort before reverse; confirm physical safety.")
     if not args.execute:
         print("PREVIEW ONLY: no CAN socket opened; no current commands.")
