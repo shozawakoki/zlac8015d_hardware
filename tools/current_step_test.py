@@ -463,7 +463,12 @@ class ZlacCurrentTester:
         if (self.last_vel_time is None or self.last_cur_time is None or
             when - self.last_vel_time > timeout or when - self.last_cur_time > timeout):
             raise RuntimeError("Speed or current CAN feedback timeout; aborting")
-        if abs(self.rpm_l) > self.args.max_speed_rpm or abs(self.rpm_r) > self.args.max_speed_rpm:
+        # The current-reversal experiment may explicitly opt out of the
+        # SOFTWARE speed threshold after separately verifying hardware safety.
+        # This does not disable feedback timeout, current, or no-response guards.
+        if (not getattr(self.args, "disable_speed_abort", False) and
+                (abs(self.rpm_l) > self.args.max_speed_rpm or
+                 abs(self.rpm_r) > self.args.max_speed_rpm)):
             raise RuntimeError(f"Overspeed: left={self.rpm_l:.1f}, right={self.rpm_r:.1f} rpm")
         if (abs(self.measured_l) > self.args.max_current_a + 1.0 or
                 abs(self.measured_r) > self.args.max_current_a + 1.0):
