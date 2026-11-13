@@ -1167,7 +1167,8 @@ hardware_interface::return_type Zlac8015dSystemHardware::write(
         mimo_model_, reference_body, measured_body, dt,
         mimo_pid_kp_, mimo_pid_ki_, mimo_pid_kd_,
         pid_derivative_filter_tau_s_, current_limit_a_,
-        body_acceleration_ff, !normal_stop_ramp_active_);
+        body_acceleration_ff, !normal_stop_ramp_active_,
+        last_velocity_feedback_time_);
       // No LESO in PID mode; logged body values are measurements only.
       mimo_ladrc_.z1 = measured_body;
       mimo_ladrc_.z2 = {{0.0, 0.0}};
