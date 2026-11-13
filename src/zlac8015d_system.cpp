@@ -1538,9 +1538,9 @@ double Zlac8015dSystemHardware::compute_current_command(
 
     // During coordinated READY, use READY_WAIT_A as a minimum current.
     // If a larger current was required to reach READY, keep that value.
-    if (coordinated_ready && !mimo_torque_mode) {
-      state.breakaway_target =
-        std::max(state.breakaway_target, READY_WAIT_A);
+    if (coordinated_ready) {
+      state.breakaway_target = mimo::coordinated_ready_target(
+        state.breakaway_target, READY_WAIT_A, mimo_torque_mode);
     }
 
     // Once READY, hold the existing BREAKAWAY current; in MIMO modes
