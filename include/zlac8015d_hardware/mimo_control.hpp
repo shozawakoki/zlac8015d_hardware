@@ -46,6 +46,17 @@ inline bool moving_for_track(
     signed_speed >= threshold_rad_s;
 }
 
+// In a coordinated turn, a wheel already moving should wait at its
+// existing breakaway current, not jump to the maximum merely because
+// its partner has not begun moving. Keep non-MIMO legacy behavior.
+inline double coordinated_ready_target(
+  const double existing_target_a, const double legacy_wait_a,
+  const bool mimo_torque_mode)
+{
+  return mimo_torque_mode ?
+    existing_target_a : std::max(existing_target_a, legacy_wait_a);
+}
+
 inline Vec2 multiply(const Mat2 & m, const Vec2 & v)
 {
   return {m[0][0] * v[0] + m[0][1] * v[1],
