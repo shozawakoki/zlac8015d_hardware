@@ -111,9 +111,9 @@ class CurrentStepTest(unittest.TestCase):
             self.tester.setup()
 
     def test_reject_no_current_no_motion(self):
-        self.tester.process_feedback((0x181, struct.pack("<ii", 0, 0), 1.0),
+        self.tester.process_feedback((0x181, struct.pack("<ii", 0, 0), 1.79),
                                      log=False)
-        self.tester.process_feedback((0x281, struct.pack("<hh", 0, 0), 1.0),
+        self.tester.process_feedback((0x281, struct.pack("<hh", 0, 0), 1.79),
                                      log=False)
         self.tester.command_l = 2.0
         self.tester.step_started = 1.0
