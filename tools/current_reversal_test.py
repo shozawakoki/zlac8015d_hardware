@@ -172,10 +172,29 @@ def switch_to_braking(tester, args, start, rpm, when):
           f"-{args.current_a:.2f} A", flush=True)
 
 
+def check_configured_drive_speed(tester, args):
+    """Fail closed if 2008h setting is lower than the test software cutoff.
+
+    2008h is a CONFIGURATION VALUE; this is not evidence that torque mode
+    implements active speed clamping, nor a motor/fixture safety rating.
+    """
+    configured_rpm = tester.sdo_read(0x2008, 0, timeout_s=0.15)
+    if not 1 <= configured_rpm <= 1000:
+        raise RuntimeError(f"Invalid 2008h motor max working speed: {configured_rpm}")
+    if args.max_speed_rpm > configured_rpm:
+        raise RuntimeError(
+            f"Software speed cutoff {args.max_speed_rpm:g} rpm exceeds drive's "
+            f"2008h configuration {configured_rpm} rpm; no nonzero current sent")
+    print(f"Preflight 2008h configured working speed={configured_rpm} rpm; "
+          "not proof of torque-mode active speed limiting", flush=True)
+    return configured_rpm
+
+
 def run_reversal(tester, args):
     tester.wait_feedback()
     tester.wait_for_stable_zero()
     tester.read_preflight_snapshot()
+    check_configured_drive_speed(tester, args)
     start = time.monotonic()
     tester.t0 = start
     tester.stage = 0
