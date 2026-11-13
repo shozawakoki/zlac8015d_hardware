@@ -124,15 +124,15 @@ class CurrentStepTest(unittest.TestCase):
         self.tester.command_l = 1.0
         self.tester.command_r = 0.0
         self.tester.sdo_read = Mock(side_effect=[
-            0x90279527,  # both motors operation enabled
+            0x10271527,  # both motors operation enabled; external E-stop inactive
             0xFC18,      # left target: -1000 mA, driver's sign convention
             0x0000,      # right target: 0 mA
         ])
         self.tester.read_target_during_motion()
         self.assertAlmostEqual(self.tester.readback_left, 1.0)
         self.assertAlmostEqual(self.tester.readback_right, 0.0)
-        self.assertEqual(self.tester.readback_status_l, 0x9527)
-        self.assertEqual(self.tester.readback_status_r, 0x9027)
+        self.assertEqual(self.tester.readback_status_l, 0x1027)
+        self.assertEqual(self.tester.readback_status_r, 0x1527)
         self.rows.seek(0)
         saved = list(csv.DictReader(self.rows))
         self.assertEqual(saved[-1]["event"], "active_target_readback")
@@ -143,12 +143,21 @@ class CurrentStepTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "exactly one step"):
             mod.preflight(self.args, mod.PROFILE_A)
 
+    def test_external_estop_guard(self):
+        # Statusword bit15 indicates external E-stop despite CiA402
+        # lower bits reporting Operation Enabled.
+        with self.assertRaisesRegex(RuntimeError, "EXTERNAL E-STOP"):
+            self.tester.require_motors_available(0x90279527)
+
+    def test_nominal_status_passes(self):
+        self.tester.require_motors_available(0x10271527)
+
     def test_probe_rejects_non_enabled_status(self):
         self.tester.t0 = 1.0
         self.tester.sdo_read = Mock(side_effect=[
-            0x00219527, 0xFC18, 0x0000
+            0x00211527, 0xFC18, 0x0000
         ])
-        with self.assertRaisesRegex(RuntimeError, "changed motor state"):
+        with self.assertRaisesRegex(RuntimeError, "Both motors must be Operation Enabled"):
             self.tester.read_target_during_motion()
 
     def test_reject_no_current_no_motion(self):
