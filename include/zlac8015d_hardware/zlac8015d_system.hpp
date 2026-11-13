@@ -106,6 +106,7 @@ private:
     double current_measured,
     double dt,
     bool allow_track_transition,
+    bool mimo_torque_mode,
     bool use_mimo_raw,
     double mimo_raw_current);
   static double clamp(double value, double lower, double upper);
