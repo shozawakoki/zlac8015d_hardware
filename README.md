@@ -433,3 +433,14 @@ g++ -std=c++17 -Wall -Wextra -pedantic -Iinclude tests/test_mimo_control.cpp -o 
 ```
 
 **Unverified:** the new mode has not been compiled against ROS 2 Humble or tested on a physical robot in this workspace; the matrix test does not constitute hardware validation.
+
+
+## 電流指令と実電流のステップ試験（MIMO現行実装の切り分け）
+
+MIMO-ADRCの直進・旋回複合指令時に発生する速度超過と電流上限到達を切り分けるため、速度制御器を通さずZLAC8015Dに直接電流を印加する独立試験を追加しました。**ROS/ros2_controlと同時実行しないこと。** 試験の安全条件と手順は [CURRENT_STEP_TEST.md](CURRENT_STEP_TEST.md) を参照してください。
+
+- 実験用プログラム：[`tools/current_step_test.py`](tools/current_step_test.py)（既定はプレビューのみ）
+- CSV集計・グラフ：[`tools/analyze_current_step.py`](tools/analyze_current_step.py)
+- CANに接続しない単体テスト：[`tests/test_current_step_test.py`](tests/test_current_step_test.py)
+
+指定プロファイルは `2,4,-4,-2,6,-2,4` A、各3秒。安全上、既定の電流上限2 Aを超えるプロファイルは**実行前に拒否**し、定格確認と明示的な電流上限指定、車輪浮上・独立非常停止の確認を必要とします。最高回転速度の初期停止閾値は120 rpmであり、試験が21秒間すべて実行される保証はありません。
