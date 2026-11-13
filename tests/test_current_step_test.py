@@ -170,6 +170,72 @@ class CurrentStepTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "No actuator response"):
             self.tester.check_safety(1.8)
 
+    def test_settle_baseline_defaults(self):
+        self.assertAlmostEqual(self.args.settle_seconds, 1.0)
+        self.assertAlmostEqual(self.args.settle_timeout_seconds, 5.0)
+        self.assertAlmostEqual(self.args.settle_max_rpm, 0.5)
+        self.assertAlmostEqual(self.args.settle_max_current_a, 0.1)
+
+    def test_stable_zero_requires_fresh_data_from_both_wheels(self):
+        self.tester.process_feedback(
+            (0x181, struct.pack("<ii", -1, 1), 1.000), log=False)
+        self.tester.process_feedback(
+            (0x281, struct.pack("<hh", -1, 0), 1.000), log=False)
+        self.assertTrue(self.tester.stable_zero_feedback(1.010, min_timestamp=0.999))
+        self.assertFalse(self.tester.stable_zero_feedback(1.010, min_timestamp=1.001))
+        self.assertFalse(self.tester.stable_zero_feedback(1.150))
+        self.tester.process_feedback(
+            (0x181, struct.pack("<ii", -6, 0), 2.000), log=False)
+        self.tester.process_feedback(
+            (0x281, struct.pack("<hh", -1, 0), 2.000), log=False)
+        self.assertFalse(self.tester.stable_zero_feedback(2.001))
+        self.tester.process_feedback(
+            (0x181, struct.pack("<ii", 0, 0), 3.000), log=False)
+        self.tester.process_feedback(
+            (0x281, struct.pack("<hh", -2, 0), 3.000), log=False)
+        self.assertFalse(self.tester.stable_zero_feedback(3.001))
+
+    def test_preflight_sdo_snapshot_logged_without_actuation(self):
+        from unittest.mock import patch
+        with patch.object(mod.time, "monotonic", return_value=5.02):
+            self.tester.process_feedback(
+                (0x181, struct.pack("<ii", 0, 0), 5.0), log=False)
+            self.tester.process_feedback(
+                (0x281, struct.pack("<hh", 0, 0), 5.0), log=False)
+            self.tester.sdo_read = Mock(side_effect=[
+                0x10271527, 4, 0, 0, 0, 0, 4104,
+            ])
+            self.tester.read_preflight_snapshot()
+        self.assertEqual(self.tester.readback_status_l, 0x1027)
+        self.assertEqual(self.tester.readback_status_r, 0x1527)
+        self.assertEqual(self.tester.preflight_mode_display, 4)
+        self.assertAlmostEqual(self.tester.preflight_bus_voltage, 41.04)
+        self.tester.send.assert_not_called()
+        self.rows.seek(0)
+        saved = list(csv.DictReader(self.rows))
+        self.assertEqual(saved[-1]["event"], "preflight_verified")
+        self.assertAlmostEqual(float(saved[-1]["preflight_bus_voltage_V"]), 41.04)
+        self.assertEqual(saved[-1]["elapsed_s"], "")
+
+    def test_preflight_rejects_nonzero_driver_target(self):
+        from unittest.mock import patch
+        with patch.object(mod.time, "monotonic", return_value=5.02):
+            self.tester.process_feedback(
+                (0x181, struct.pack("<ii", 0, 0), 5.0), log=False)
+            self.tester.process_feedback(
+                (0x281, struct.pack("<hh", 0, 0), 5.0), log=False)
+            self.tester.sdo_read = Mock(side_effect=[
+                0x10271527, 4, 0xFC18, 0, 0, 0, 4104,
+            ])
+            with self.assertRaisesRegex(RuntimeError, "target not zero"):
+                self.tester.read_preflight_snapshot()
+        self.tester.send.assert_not_called()
+
+    def test_reject_invalid_settling_configuration(self):
+        self.args.settle_seconds = 6.0
+        with self.assertRaisesRegex(ValueError, "Invalid zero-current"):
+            mod.preflight(self.args, (0.5,))
+
     def test_stale_feedback_trip(self):
         self.tester.process_feedback((0x181, struct.pack("<ii", 0, 0), 1.0),
                                      log=False)
