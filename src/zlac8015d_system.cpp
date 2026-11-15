@@ -217,7 +217,7 @@ hardware_interface::CallbackReturn Zlac8015dSystemHardware::on_init(
   }
 
   // Experimental LADRC current commands can reach 8 A as requested.
-  // Independent 5 km/h wheel-overspeed protection commands both wheels 0 A.
+  // Independent 2.0 m/s wheel-overspeed protection commands both wheels 0 A.
   if (experimental_no_breakaway_ &&
       (!std::isfinite(no_breakaway_current_limit_a_) ||
        no_breakaway_current_limit_a_ <= 0.0 ||
@@ -324,9 +324,9 @@ hardware_interface::CallbackReturn Zlac8015dSystemHardware::on_init(
   if (experimental_no_breakaway_) {
     RCLCPP_WARN(
       rclcpp::get_logger("Zlac8015dSystemHardware"),
-      "MIMO_LADRC_NO_BREAKAWAY_EXP_20261115_R4 active. "
+      "MIMO_LADRC_NO_BREAKAWAY_EXP_20261115_R5 active. "
       "BREAKAWAY disabled; Imax=%.2f A, dI/dt=%.2f A/s. "
-      "Either wheel peripheral speed >=5.0km/h => both currents 0 A, "
+      "Either wheel peripheral speed >=2.0m/s => both currents 0 A, "
       "latched until controller restart.",
       no_breakaway_current_limit_a_, current_rate_limit_a_per_s_);
   }
@@ -671,8 +671,8 @@ hardware_interface::return_type Zlac8015dSystemHardware::read(
         RCLCPP_ERROR(
           rclcpp::get_logger("Zlac8015dSystemHardware"),
           "MIMO_WHEEL_OVERSPEED_STOP: measured L=%.3f R=%.3f rad/s, "
-          "wheel radius=%.3f m, threshold=5.0 km/h "
-          "(1.388889 m/s, 21.701389 rad/s at radius=0.064 m). "
+          "wheel radius=%.3f m, threshold=2.0 m/s "
+          "(31.25 rad/s at radius=0.064 m). "
           "Both wheel currents forced to zero until controller restart.",
           hw_velocities_[0], hw_velocities_[1], mimo_wheel_radius_m_);
       }
@@ -892,7 +892,7 @@ hardware_interface::return_type Zlac8015dSystemHardware::write(
       }
     };
 
-  // Wheel peripheral speed >= 5.0 km/h is a latched stop, independent
+  // Wheel peripheral speed >= 2.0 m/s is a latched stop, independent
   // of command reference, startup conditions, and regular stop ramps.
   // No automatic rearm when wheel speed falls or /cmd_vel becomes zero.
   if (experimental_no_breakaway_ && no_breakaway_overspeed_latched_) {
