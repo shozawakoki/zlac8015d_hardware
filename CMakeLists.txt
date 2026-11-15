@@ -26,4 +26,14 @@ pluginlib_export_plugin_description_file(hardware_interface zlac8015d_hardware.x
 install(TARGETS zlac8015d_hardware DESTINATION lib)
 install(DIRECTORY include/ DESTINATION include)
 
+# The experiment includes an offline C++17 model test. It never connects
+# to ROS, CAN, or the motor driver and needs no additional test dependency.
+if(BUILD_TESTING)
+  enable_testing()
+  add_executable(test_no_breakaway_ladrc tests/test_no_breakaway_ladrc.cpp)
+  target_include_directories(test_no_breakaway_ladrc PRIVATE include)
+  target_compile_features(test_no_breakaway_ladrc PRIVATE cxx_std_17)
+  add_test(NAME test_no_breakaway_ladrc COMMAND test_no_breakaway_ladrc)
+endif()
+
 ament_package()
