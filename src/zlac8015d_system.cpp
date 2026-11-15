@@ -1093,7 +1093,9 @@ hardware_interface::return_type Zlac8015dSystemHardware::write(
       (std::abs(control_ref_l) > 1.0e-6 ||
        std::abs(control_ref_r) > 1.0e-6);
 
-    if (!active_reference || no_breakaway_stall_lockout_) {
+    if (!active_reference ||
+        (no_breakaway_stall_lockout_ &&
+         !no_breakaway_coordinated_guard_.latched)) {
       // Preserve the existing latched zero-current stop. During a stall
       // lockout, never restart on a repeated nonzero velocity command.
       left_ladrc_.tracking = false;
