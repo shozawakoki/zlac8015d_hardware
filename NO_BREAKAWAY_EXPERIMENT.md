@@ -1,4 +1,4 @@
-# BREAKAWAYなしMIMO-LADRC：8 A指令と車輪周速度5 km/hの過速度遮断（検証版）
+# BREAKAWAYなしMIMO-LADRC：8 A指令と車輪周速度2.0 m/sの過速度遮断（検証版）
 
 ## バージョンと用途
 
@@ -6,7 +6,7 @@
 - 採用済みの安定版：`release/mimo-ladrc-stable` は変更しない
 - ROS 2 Humble / Ubuntu 22.04 / ZLAC8015D CANopen、制御周期200 Hz
 - 起動モード：`ZLAC_CONTROL_MODE=mimo_ladrc_no_breakaway`
-- 起動識別子：`MIMO_LADRC_NO_BREAKAWAY_EXP_20261115_R4`
+- 起動識別子：`MIMO_LADRC_NO_BREAKAWAY_EXP_20261115_R5`
 
 ## 変更したモータ制御
 
@@ -31,9 +31,9 @@
 ホイールの実測角速度をROS正方向の符号に変換した後、**受信したTPDO0の各フレームごと**に判定する。車輪半径r=0.064 mで、
 
 ```text
-wheel_limit_m_s = 5.0 / 3.6 = 1.3888889 m/s
-wheel_limit_rad_s = (5.0 / 3.6) / 0.064 = 約21.7014 rad/s
-wheel_limit_rpm = wheel_limit_rad_s * 60 / (2*pi) = 約207.23 rpm
+wheel_limit_m_s = 2.0 m/s
+wheel_limit_rad_s = 2.0 / 0.064 = 31.25 rad/s
+wheel_limit_rpm = wheel_limit_rad_s * 60 / (2*pi) = 約298.4 rpm
 trigger = abs(omega_left) >= wheel_limit_rad_s OR
           abs(omega_right) >= wheel_limit_rad_s
 ```
@@ -67,7 +67,7 @@ cd ~/ros2_ws
 colcon build --packages-select zlac8015d_hardware zlac_can_bringup --symlink-install
 source install/setup.bash
 LIB="$(ros2 pkg prefix zlac8015d_hardware)/lib/libzlac8015d_hardware.so"
-strings "$LIB" | grep -F MIMO_LADRC_NO_BREAKAWAY_EXP_20261115_R4
+strings "$LIB" | grep -F MIMO_LADRC_NO_BREAKAWAY_EXP_20261115_R5
 ```
 
 ## 起動（上記に問題がない場合のみ）
