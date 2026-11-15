@@ -1164,21 +1164,12 @@ hardware_interface::return_type Zlac8015dSystemHardware::write(
       // Force stalled-wheel current to zero and provide at most 1 A
       // opposite the measured direction to the still-spinning wheel.
       // The brake cannot reverse a wheel when it reaches rest.
-      const double di = current_rate_limit_a_per_s_ * dt;
-      const auto safe_brake = [&](const double speed,
-                                  const double last_a) -> double
-      {
-        if (std::abs(speed) <= 0.10) {return 0.0;}
-        const double target = -std::copysign(
-          std::min(1.0, 0.25 * std::abs(speed)), speed);
-        double next = clamp(target, last_a - di, last_a + di);
-        if (next * speed > 0.0) {next = 0.0;}
-        return clamp(next, -1.0, 1.0);
-      };
-      const double left_brake =
-        safe_brake(hw_velocities_[0], current_l_measured);
-      const double right_brake =
-        safe_brake(hw_velocities_[1], current_r_measured);
+      const double left_brake = mimo::coupled_stall_brake_current(
+        hw_velocities_[0], current_l_measured, dt,
+        current_rate_limit_a_per_s_);
+      const double right_brake = mimo::coupled_stall_brake_current(
+        hw_velocities_[1], current_r_measured, dt,
+        current_rate_limit_a_per_s_);
       if (!no_breakaway_stall_lockout_) {
         RCLCPP_ERROR(
           rclcpp::get_logger("Zlac8015dSystemHardware"),
