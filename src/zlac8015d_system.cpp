@@ -311,6 +311,7 @@ hardware_interface::CallbackReturn Zlac8015dSystemHardware::on_init(
   RCLCPP_INFO(
     rclcpp::get_logger("Zlac8015dSystemHardware"),
     "Configured mode=%s, CAN=%s, node=%u, wc=%.3f, wo=%.3f, Imax=%.3f A",
+    experimental_no_breakaway_ ? "mimo_ladrc_no_breakaway" :
     control_mode_ == ControlMode::VELOCITY ? "velocity" :
       (control_mode_ == ControlMode::PID_TORQUE ? "pid_torque" :
          control_mode_ == ControlMode::MIMO_LADRC_TORQUE ? "mimo_ladrc_torque" :
@@ -323,10 +324,10 @@ hardware_interface::CallbackReturn Zlac8015dSystemHardware::on_init(
   if (experimental_no_breakaway_) {
     RCLCPP_WARN(
       rclcpp::get_logger("Zlac8015dSystemHardware"),
-      "MIMO_LADRC_NO_BREAKAWAY_EXP_20261115_R1 active. "
+      "MIMO_LADRC_NO_BREAKAWAY_EXP_20261115_R2 active. "
       "Open-loop BREAKAWAY disabled; MIMO-LADRC from standstill. "
       "Experimental Imax=%.2f A, dI/dt=%.2f A/s, "
-      "coordinated lockout=0.15s and brake<=1 A. "
+      "coupled stall confirmation=0.15s, brake<=1 A. "
       "Not the validated stable controller.",
       no_breakaway_current_limit_a_, current_rate_limit_a_per_s_);
   }
@@ -800,6 +801,10 @@ hardware_interface::return_type Zlac8015dSystemHardware::write(
                     << ",mimo_pid_d_v_m_s2,mimo_pid_d_omega_rad_s2"
                     << ",mimo_pid_d_updated,mimo_pid_d_dt_s";
           }
+          if (experimental_no_breakaway_) {
+            csv_log << ",coordinated_stall_stop,coordinated_stalled_wheel"
+                    << ",stall_current_timer_s";
+          }
           csv_log << '\n';
 
           csv_log << std::setprecision(10);
@@ -861,6 +866,11 @@ hardware_interface::return_type Zlac8015dSystemHardware::write(
                   << "," << mimo_pid_.filtered_derivative[1]
                   << "," << static_cast<int>(mimo_pid_.derivative_updated)
                   << "," << mimo_pid_.derivative_sample_dt_s;
+        }
+        if (experimental_no_breakaway_) {
+          csv_log << "," << static_cast<int>(no_breakaway_coordinated_guard_.latched)
+                  << "," << no_breakaway_coordinated_guard_.stalled_wheel
+                  << "," << no_breakaway_stall_elapsed_s_;
         }
         csv_log << '\n';
 
