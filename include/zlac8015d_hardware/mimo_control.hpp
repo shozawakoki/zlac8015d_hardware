@@ -127,6 +127,33 @@ struct CoordinatedStallGuard
   }
 };
 
+// Safety-only deceleration after asymmetric stall. Force the sign opposite
+// to measured motion; never keep applying drive torque in the wrong
+// direction while a wheel is constrained. Normal LADRC is not modified.
+inline double coupled_stall_brake_current(
+  const double measured_speed, const double previous_current,
+  const double dt, const double rate_limit_a_per_s)
+{
+  if (!std::isfinite(measured_speed) ||
+      !std::isfinite(previous_current) || !std::isfinite(dt) ||
+      !std::isfinite(rate_limit_a_per_s) ||
+      dt <= 0.0 || rate_limit_a_per_s <= 0.0)
+  {
+    return 0.0;
+  }
+  if (std::abs(measured_speed) <= 0.10) {return 0.0;}
+  const double target =
+    -std::copysign(std::min(1.0, 0.25 * std::abs(measured_speed)),
+                   measured_speed);
+  const double max_step = rate_limit_a_per_s * dt;
+  const double next = std::max(previous_current - max_step,
+                     std::min(previous_current + max_step, target));
+  // Cut a positive driving current immediately instead of prolonging it
+  // during the initial sign change of an emergency brake.
+  if (next * measured_speed > 0.0) {return 0.0;}
+  return std::max(-1.0, std::min(1.0, next));
+}
+
 inline Vec2 multiply(const Mat2 & m, const Vec2 & v)
 {
   return {m[0][0] * v[0] + m[0][1] * v[1],
