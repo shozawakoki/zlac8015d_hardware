@@ -125,6 +125,7 @@ private:
   double no_breakaway_current_limit_a_{1.0};
   double no_breakaway_stall_elapsed_s_{0.0};
   bool no_breakaway_stall_lockout_{false};
+  mimo::CoordinatedStallGuard no_breakaway_coordinated_guard_;
   LadrcState left_ladrc_;
   LadrcState right_ladrc_;
   PidState left_pid_;
