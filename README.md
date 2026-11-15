@@ -3,7 +3,7 @@
 このブランチ `experiment/mimo-ladrc-no-breakaway` は検証用です。採用済みの `release/mimo-ladrc-stable` は変更していません。
 
 起動時に `ZLAC_CONTROL_MODE=mimo_ladrc_no_breakaway` を指定すると、静止状態からMIMO-LADRCを使用し、始動用BREAKAWAY制御を通しません。
-安全のため実験モードのみ既定1 Aの電流上限（最大設定2 A）、20 A/sの変化率制限、2秒の飽和ストールラッチを備えています。
+実験モードは通常時の電流指令上限を8 A/輪（20 A/sの変化率制限）に変更しています。片輪拘束がv・角速度偏差と左右速度差から0.15秒継続して検出された場合は、駆動輪電流を0にし、回転輪に最大1 Aの制動電流を適用して再始動をラッチ禁止します。停止中の高電流（2 A以上）も0.4秒で遮断します。**手でタイヤを止める試験は行わないでください。**
 
 検証方法、状態の切り分け、200Hz CSV、安定版への復帰手順は [NO_BREAKAWAY_EXPERIMENT.md](NO_BREAKAWAY_EXPERIMENT.md) を参照してください。
 
