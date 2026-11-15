@@ -173,7 +173,7 @@ hardware_interface::CallbackReturn Zlac8015dSystemHardware::on_init(
       get_double_parameter(info_, "mimo_pid_kd_omega", pid_kd_)}};
     current_limit_a_ = get_double_parameter(info_, "current_limit_a", 8.0);
     no_breakaway_current_limit_a_ =
-      get_double_parameter(info_, "no_breakaway_current_limit_a", 1.0);
+      get_double_parameter(info_, "no_breakaway_current_limit_a", 8.0);
     current_rate_limit_a_per_s_ =
       get_double_parameter(info_, "current_rate_limit_a_per_s", 20.0);
     feedback_timeout_s_ =
@@ -216,17 +216,17 @@ hardware_interface::CallbackReturn Zlac8015dSystemHardware::on_init(
     return hardware_interface::CallbackReturn::ERROR;
   }
 
-  // Experimental startup is intentionally current-limited independently of
-  // the general torque mode ceiling. It never exceeds 2 A or Imax.
+  // Experimental LADRC current commands can reach 8 A as requested, while
+  // an independent coordinated-stall guard brakes the free wheel on lock.
   if (experimental_no_breakaway_ &&
       (!std::isfinite(no_breakaway_current_limit_a_) ||
        no_breakaway_current_limit_a_ <= 0.0 ||
-       no_breakaway_current_limit_a_ > 2.0 ||
+       no_breakaway_current_limit_a_ > 8.0 ||
        no_breakaway_current_limit_a_ > current_limit_a_))
   {
     RCLCPP_ERROR(
       rclcpp::get_logger("Zlac8015dSystemHardware"),
-      "Experimental no-BREAKAWAY current cap must be in (0, 2.0] A "
+      "Experimental no-BREAKAWAY current cap must be in (0, 8.0] A "
       "and not exceed current_limit_a.");
     return hardware_interface::CallbackReturn::ERROR;
   }
@@ -326,7 +326,8 @@ hardware_interface::CallbackReturn Zlac8015dSystemHardware::on_init(
       "MIMO_LADRC_NO_BREAKAWAY_EXP_20261115_R1 active. "
       "Open-loop BREAKAWAY disabled; MIMO-LADRC from standstill. "
       "Experimental Imax=%.2f A, dI/dt=%.2f A/s, "
-      "stall lockout=2.0 s. Not the validated stable controller.",
+      "coordinated lockout=0.15s and brake<=1 A. "
+      "Not the validated stable controller.",
       no_breakaway_current_limit_a_, current_rate_limit_a_per_s_);
   }
 
@@ -439,6 +440,7 @@ hardware_interface::CallbackReturn Zlac8015dSystemHardware::on_activate(
   quick_stop_active_ = false;
   no_breakaway_stall_elapsed_s_ = 0.0;
   no_breakaway_stall_lockout_ = false;
+  no_breakaway_coordinated_guard_.reset();
   if (experimental_no_breakaway_) {
     left_ladrc_.breakaway_target = 0.0;
     right_ladrc_.breakaway_target = 0.0;
@@ -1079,6 +1081,7 @@ hardware_interface::return_type Zlac8015dSystemHardware::write(
   if (experimental_no_breakaway_) {
     // Receiving a stop command re-arms the 2-second startup-stall latch.
     if (zero_velocity_command) {
+      no_breakaway_coordinated_guard_.reset();
       no_breakaway_stall_elapsed_s_ = 0.0;
       no_breakaway_stall_lockout_ = false;
       left_ladrc_.stall_lockout = false;
