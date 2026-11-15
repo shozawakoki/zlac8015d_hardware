@@ -1,3 +1,13 @@
+# 実験版：静止状態からMIMO-LADRCで直接発進（BREAKAWAYなし）
+
+このブランチ `experiment/mimo-ladrc-no-breakaway` は検証用です。採用済みの `release/mimo-ladrc-stable` は変更していません。
+
+起動時に `ZLAC_CONTROL_MODE=mimo_ladrc_no_breakaway` を指定すると、静止状態からMIMO-LADRCを使用し、始動用BREAKAWAY制御を通しません。
+安全のため実験モードのみ既定1 Aの電流上限（最大設定2 A）、20 A/sの変化率制限、2秒の飽和ストールラッチを備えています。
+
+検証方法、状態の切り分け、200Hz CSV、安定版への復帰手順は [NO_BREAKAWAY_EXPERIMENT.md](NO_BREAKAWAY_EXPERIMENT.md) を参照してください。
+
+---
 # zlac8015d_hardware — MIMO-LADRC 完成版
 
 ROS 2 Humble・ZLAC8015D CANopen hardware_interface。完成版ブランチ: `release/mimo-ladrc-stable`。
