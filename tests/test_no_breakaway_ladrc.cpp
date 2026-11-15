@@ -75,5 +75,5 @@ int main()
 
   // No requirement for actual wheel movement before the LADRC step.
   // Saturation and slew-rate protection still apply.
-  std::cout << "No-BREAKAWAY LADRC pure-model tests passed\\n";
+  std::cout << "No-BREAKAWAY LADRC pure-model tests passed\n";
 }
