@@ -119,6 +119,12 @@ private:
 
   // Controller configuration
   ControlMode control_mode_{ControlMode::VELOCITY};
+  // Experimental, opt-in only: apply MIMO-LADRC from zero wheel speed.
+  // The stable mimo_ladrc_torque state machine is completely unchanged.
+  bool experimental_no_breakaway_{false};
+  double no_breakaway_current_limit_a_{1.0};
+  double no_breakaway_stall_elapsed_s_{0.0};
+  bool no_breakaway_stall_lockout_{false};
   LadrcState left_ladrc_;
   LadrcState right_ladrc_;
   PidState left_pid_;
