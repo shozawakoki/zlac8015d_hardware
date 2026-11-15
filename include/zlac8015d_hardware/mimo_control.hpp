@@ -77,6 +77,7 @@ struct CoordinatedStallGuard
 
   bool update(
     const Vec2 & wheel_reference, const Vec2 & wheel_measured,
+    const double linear_reference, const double linear_measured,
     const double yaw_reference, const double yaw_measured,
     const double dt)
   {
@@ -85,6 +86,7 @@ struct CoordinatedStallGuard
         !std::isfinite(wheel_reference[1]) ||
         !std::isfinite(wheel_measured[0]) ||
         !std::isfinite(wheel_measured[1]) ||
+        !std::isfinite(linear_reference) || !std::isfinite(linear_measured) ||
         !std::isfinite(yaw_reference) || !std::isfinite(yaw_measured) ||
         !std::isfinite(dt) || dt <= 0.0) {
       mismatch_duration_s = 0.0;
@@ -95,6 +97,7 @@ struct CoordinatedStallGuard
     constexpr double kStuckSpeed = 0.20; // rad/s
     constexpr double kOtherWheelMoving = 1.0; // rad/s
     constexpr double kExcessYaw = 0.35; // rad/s
+    constexpr double kLinearTrackingError = 0.08; // m/s
     constexpr double kConfirmDuration = 0.15; // s
 
     const bool both_requested =
@@ -102,13 +105,16 @@ struct CoordinatedStallGuard
       std::abs(wheel_reference[1]) >= kMinRequestedWheelSpeed;
     const bool yaw_mismatch =
       std::abs(yaw_measured - yaw_reference) >= kExcessYaw;
+    const bool linear_mismatch =
+      std::abs(linear_measured - linear_reference) >= kLinearTrackingError;
     const bool left_stuck =
       std::abs(wheel_measured[0]) <= kStuckSpeed &&
       std::abs(wheel_measured[1]) >= kOtherWheelMoving;
     const bool right_stuck =
       std::abs(wheel_measured[1]) <= kStuckSpeed &&
       std::abs(wheel_measured[0]) >= kOtherWheelMoving;
-    if (both_requested && yaw_mismatch && (left_stuck || right_stuck)) {
+    if (both_requested && yaw_mismatch && linear_mismatch &&
+        (left_stuck || right_stuck)) {
       mismatch_duration_s += dt;
       if (mismatch_duration_s >= kConfirmDuration) {
         latched = true;
