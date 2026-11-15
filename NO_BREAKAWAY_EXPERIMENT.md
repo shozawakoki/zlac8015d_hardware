@@ -11,10 +11,11 @@
 - **実験版** `ZLAC_CONTROL_MODE=mimo_ladrc_no_breakaway`：BREAKAWAY、READY待ち、TRACK電流下限補正、方向反転時のBREAKAWAY再突入、ストールからBREAKAWAYへの戻りを**一切使用しない**。
 - 実験モードのMIMO-LADRCとLESOは目標車輪角速度が1輪だけ非ゼロでも作動。制御開始時のESOはエンコーダの実測速度で初期化する。
 - 通信フィードバック監視、20 A/sの電流変化率制限、通常停止の減速ランプとZERO HOLD、CAN送信検査は維持。
-- 実験モードの電流上限は既定で**1.0 A/輪**。URDFに任意のhardware param `no_breakaway_current_limit_a` を加えれば変更可能だが、許可範囲は `(0,2.0] A` かつ `current_limit_a` 以下。まず既定値で試験する。
-- いずれかの車輪が `stall_speed_rad_s` 未満で、その車輪自身の電流指令が上限の95%以上に2秒間張り付くと、再発進を試みず**電流0のラッチ状態**に入り、速度指令を明示的に0へ戻すまで解除しない。
-- 既存の全体Imax=8 Aとは異なり実験上限が優先する。従来の安定モードでは新しい1 A制限は無効。
-- 診断識別子 `MIMO_LADRC_NO_BREAKAWAY_EXP_20261115_R1`。内部CSVは `/tmp/mimo_ladrc_no_breakaway_200hz.csv` に記録。`tracking_left/right=1` はLADRC計算中（BREAKAWAY不使用）を表す。
+- 実験モードの通常LADRC指令の上限はユーザー指定の**8.0 A/輪**。URDFのhardware param `no_breakaway_current_limit_a` で変更できるが、許可範囲は `(0,8.0] A` かつ全体の `current_limit_a` 以下。検証時は許容電流・モータ温度・実電流を監視し、手を用いた拘束は絶対に行わない。
+- **片輪拘束の連動停止**：左右両輪が1 rad/s以上の目標を持つとき、片輪の実速度が0.2 rad/s以下・他輪が1 rad/s以上、さらに並進速度誤差0.08 m/s以上と角速度誤差0.35 rad/s以上が0.15秒継続した場合に安全停止をラッチする。拘束輪の電流は0、回転輪には最大1 Aの減速方向電流をかける（20 A/s制限を維持）。コマンドを一旦0にして解除するまで再駆動しない。これはMIMO-LADRCの通常制御とは独立した**安全保護**である。
+- **無回転高電流の保護**：どちらかの車輪が `stall_speed_rad_s` 未満のまま2 A以上を0.4秒継続した場合は両電流0をラッチする。この保護は車輪の惰性回転を能動制動しないので、外部非常停止と適切な停止距離が別途必要。
+- 通常時の実験用Imaxと全体Imaxはともに8 A。拘束停止中は制動を最大1 Aに制限する。安定版のゲイン・状態遷移・電流制御は変更しない。
+- 診断識別子 `MIMO_LADRC_NO_BREAKAWAY_EXP_20261115_R2`。内部CSVは `/tmp/mimo_ladrc_no_breakaway_200hz.csv` に記録し、`coordinated_stall_stop`・`coordinated_stalled_wheel`・`stall_current_timer_s` を追加。`tracking_left/right=1` はLADRC計算中（BREAKAWAY不使用）を表す。
 
 ## 理論上の注意
 
@@ -40,7 +41,7 @@ colcon build --packages-select zlac8015d_hardware zlac_can_bringup --symlink-ins
 source install/setup.bash
 
 LIB="$(ros2 pkg prefix zlac8015d_hardware)/lib/libzlac8015d_hardware.so"
-strings "$LIB" | grep -F MIMO_LADRC_NO_BREAKAWAY_EXP_20261115_R1
+strings "$LIB" | grep -F MIMO_LADRC_NO_BREAKAWAY_EXP_20261115_R2
 ```
 
 端末1・起動：
@@ -68,6 +69,12 @@ ros2 control list_controllers
 cp /tmp/mimo_ladrc_no_breakaway_200hz.csv \
   "$HOME/ros2_ws/no_breakaway_$(date -u +%Y%m%dT%H%M%SZ).csv"
 ```
+
+## 今回の拘束ログ（2026-11-15 05:42 UTC開始）の観察
+
+7.5〜9.5秒および13.5〜15.5秒付近に、目標速度が左右とも大きい一方、左車輪はほぼ0 rad/s、右車輪が約±9.7 rad/sで回転する区間がある。前者の8.5秒付近では、目標[v,ω]=[0.60,0.15]、実測[v,ω]=[0.31,1.77]。左輪のLADRC電流は旧上限+1 Aで飽和し、右輪は約+0.23 Aで走り続けていた。今回の変更はこのような不可能なv/ω同時追従条件を検知して連動停止させる。計測用CSV上の情報であり、実際の手による保持力や接地速度は特定できない。
+
+回転を手で止める試験は危険なため、必ず接触しない負荷・安全遮蔽・非常停止を備えた方法を使用する。8 Aの電流指令は拘束トルクを大きくするため、最大電流がモータ・配線・機構で許容されるか事前に確認する。
 
 ## 比較する主な指標
 
