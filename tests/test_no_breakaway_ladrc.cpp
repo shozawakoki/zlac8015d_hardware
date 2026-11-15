@@ -74,11 +74,11 @@ int main()
   assert(turn_current[0] > 0.0);
   assert(turn_current[1] < 0.0);
 
-  // Wheel peripheral overspeed at 5 km/h = 5/3.6 m/s:
-  // omega_limit = (5/3.6)/0.064 = 21.701388... rad/s.
+  // Wheel peripheral overspeed at 2.0 m/s:
+  // omega_limit = 2.0/0.064 = 31.25 rad/s.
   // Trigger at the threshold on EITHER wheel, in either direction.
   using zlac8015d_hardware::mimo::wheel_overspeed;
-  const double omega_limit = (5.0 / 3.6) / 0.064;
+  const double omega_limit = 2.0 / 0.064;
   assert(!wheel_overspeed({{omega_limit - 0.01, 0.0}}, 0.064));
   assert(!wheel_overspeed({{0.0, -omega_limit + 0.01}}, 0.064));
   assert(wheel_overspeed({{omega_limit, 0.0}}, 0.064));
