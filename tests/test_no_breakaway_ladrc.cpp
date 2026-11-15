@@ -3,6 +3,7 @@
 #include <cassert>
 #include <cmath>
 #include <iostream>
+#include <limits>
 
 using zlac8015d_hardware::mimo::DifferentialDriveModel;
 using zlac8015d_hardware::mimo::Ladrc;
@@ -73,56 +74,24 @@ int main()
   assert(turn_current[0] > 0.0);
   assert(turn_current[1] < 0.0);
 
-  // Guard uses both body-coordinate errors and wheel-specific velocity.
-  // Reproduce the measured left-wheel lock at ~8.5s in the supplied CSV:
-  // desired body [v,yaw]=[0.60,0.15], measured=[0.31,1.77].
-  zlac8015d_hardware::mimo::CoordinatedStallGuard guard;
-  const Vec2 blocked_wheel_reference{{8.92, 9.77}};
-  const Vec2 blocked_wheel_measured{{0.0, 9.77}};
-  for (int i = 0; i < 29; ++i) {
-    assert(!guard.update(
-      blocked_wheel_reference, blocked_wheel_measured,
-      0.60, 0.31, 0.15, 1.77, dt));
-  }
-  assert(guard.update(
-    blocked_wheel_reference, blocked_wheel_measured,
-    0.60, 0.31, 0.15, 1.77, dt));
-  assert(guard.latched);
-  assert(guard.stalled_wheel == 0);
-  assert(guard.update(
-    blocked_wheel_reference, {{4.0, 9.77}},
-    0.60, 0.31, 0.15, 1.77, dt)); // remains latched
-  guard.reset();
-  assert(!guard.latched);
-  // No false trip during normal straight/turn speeds with no large errors.
-  for (int i = 0; i < 500; ++i) {
-    assert(!guard.update(
-      {{8.92, 9.77}}, {{8.90, 9.75}},
-      0.60, 0.598, 0.15, 0.154, dt));
-  }
-  // No trip if only one wheel was commanded to move.
-  for (int i = 0; i < 100; ++i) {
-    assert(!guard.update(
-      {{0.0, 9.77}}, {{0.0, 9.77}},
-      0.30, 0.31, 1.77, 1.77, dt));
-  }
-  // No trip on a normal synchronized start where both wheels are still.
-  for (int i = 0; i < 100; ++i) {
-    assert(!guard.update(
-      {{8.92, 9.77}}, {{0.0, 0.0}},
-      0.60, 0.0, 0.15, 0.0, dt));
-  }
-  // A triggered guard must brake the moving wheel without applying
-  // extra current to an immobilized wheel.
-  using zlac8015d_hardware::mimo::coupled_stall_brake_current;
-  assert(coupled_stall_brake_current(0.0, 8.0, dt, 20.0) == 0.0);
-  assert(coupled_stall_brake_current(9.77, +1.0, dt, 20.0) == 0.0);
-  assert(std::abs(coupled_stall_brake_current(9.77, 0.0, dt, 20.0)
-                  - (-0.1)) < 1.0e-12);
-  assert(std::abs(coupled_stall_brake_current(-9.77, 0.0, dt, 20.0)
-                  - (+0.1)) < 1.0e-12);
-  assert(coupled_stall_brake_current(9.77, -1.0, dt, 20.0) == -1.0);
+  // Wheel peripheral speed threshold is 2.0 m/s, with r=0.064 m:
+  // 31.25 rad/s in either direction, on EITHER wheel.
+  using zlac8015d_hardware::mimo::wheel_overspeed;
+  assert(!wheel_overspeed({{31.24, 0.0}}, 0.064));
+  assert(!wheel_overspeed({{0.0, -31.24}}, 0.064));
+  assert(wheel_overspeed({{31.25, 0.0}}, 0.064));
+  assert(wheel_overspeed({{0.0, -31.25}}, 0.064));
+  assert(wheel_overspeed({{-35.0, 1.0}}, 0.064));
+  assert(!wheel_overspeed({{+20.0, -20.0}}, 0.064));
+  assert(wheel_overspeed({{0.0, 1.0}}, -0.064));
+  // Invalid encoder feedback must fail closed.
+  assert(wheel_overspeed(
+    {{std::numeric_limits<double>::quiet_NaN(), 0.0}}, 0.064));
+
+  // Normal LADRC still has the 8 A command ceiling with 20 A/s slew.
   assert(std::abs(limit_current(10.0, 7.9, 8.0, 20.0, dt) - 8.0) < 1.0e-12);
+  assert(std::abs(limit_current(-10.0, -7.9, 8.0, 20.0, dt) + 8.0) < 1.0e-12);
+
   // No requirement for actual wheel movement before the LADRC step.
   // Saturation and slew-rate protection still apply.
   std::cout << "No-BREAKAWAY LADRC pure-model tests passed\n";
