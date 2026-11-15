@@ -122,7 +122,7 @@ private:
   // Experimental, opt-in only: apply MIMO-LADRC from zero wheel speed.
   // The stable mimo_ladrc_torque state machine is completely unchanged.
   bool experimental_no_breakaway_{false};
-  double no_breakaway_current_limit_a_{1.0};
+  double no_breakaway_current_limit_a_{8.0};
   double no_breakaway_stall_elapsed_s_{0.0};
   bool no_breakaway_stall_lockout_{false};
   mimo::CoordinatedStallGuard no_breakaway_coordinated_guard_;
