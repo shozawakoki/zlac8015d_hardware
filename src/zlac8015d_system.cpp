@@ -1165,16 +1165,17 @@ hardware_interface::return_type Zlac8015dSystemHardware::write(
     right_ladrc_.z2 = disturbance_wheels[1];
 
     // Thermal / no-start safeguard, not a restart controller:
-    // if BOTH wheels remain below the stall-speed threshold while
-    // either LADRC current is nearly saturated for 2 s, latch
-    // zero current until an explicit zero-velocity command arrives.
-    const bool both_still =
+    // if EITHER wheel remains nearly stationary while ITS own LADRC
+    // current is nearly saturated for 2 s, latch both currents to zero.
+    // This also protects against one stuck wheel while the other moves.
+    const bool left_stuck_at_limit =
       std::abs(hw_velocities_[0]) < stall_speed_rad_s_ &&
-      std::abs(hw_velocities_[1]) < stall_speed_rad_s_;
-    const bool near_current_limit =
-      std::abs(cmd_l) >= 0.95 * imax ||
+      std::abs(cmd_l) >= 0.95 * imax;
+    const bool right_stuck_at_limit =
+      std::abs(hw_velocities_[1]) < stall_speed_rad_s_ &&
       std::abs(cmd_r) >= 0.95 * imax;
-    if (!zero_velocity_command && both_still && near_current_limit) {
+    if (!zero_velocity_command &&
+        (left_stuck_at_limit || right_stuck_at_limit)) {
       no_breakaway_stall_elapsed_s_ += dt;
     } else {
       no_breakaway_stall_elapsed_s_ = 0.0;
