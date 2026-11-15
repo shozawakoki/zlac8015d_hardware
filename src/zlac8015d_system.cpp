@@ -216,8 +216,8 @@ hardware_interface::CallbackReturn Zlac8015dSystemHardware::on_init(
     return hardware_interface::CallbackReturn::ERROR;
   }
 
-  // Experimental LADRC current commands can reach 8 A as requested, while
-  // an independent coordinated-stall guard brakes the free wheel on lock.
+  // Experimental LADRC current commands can reach 8 A as requested.
+  // Independent 2 m/s wheel-overspeed protection commands both wheels 0 A.
   if (experimental_no_breakaway_ &&
       (!std::isfinite(no_breakaway_current_limit_a_) ||
        no_breakaway_current_limit_a_ <= 0.0 ||
@@ -324,11 +324,10 @@ hardware_interface::CallbackReturn Zlac8015dSystemHardware::on_init(
   if (experimental_no_breakaway_) {
     RCLCPP_WARN(
       rclcpp::get_logger("Zlac8015dSystemHardware"),
-      "MIMO_LADRC_NO_BREAKAWAY_EXP_20261115_R2 active. "
-      "Open-loop BREAKAWAY disabled; MIMO-LADRC from standstill. "
-      "Experimental Imax=%.2f A, dI/dt=%.2f A/s, "
-      "coupled stall confirmation=0.15s, brake<=1 A. "
-      "Not the validated stable controller.",
+      "MIMO_LADRC_NO_BREAKAWAY_EXP_20261115_R3 active. "
+      "BREAKAWAY disabled; Imax=%.2f A, dI/dt=%.2f A/s. "
+      "Either wheel peripheral speed >=2.0m/s => both currents 0 A, "
+      "latched until controller restart.",
       no_breakaway_current_limit_a_, current_rate_limit_a_per_s_);
   }
 
@@ -439,9 +438,7 @@ hardware_interface::CallbackReturn Zlac8015dSystemHardware::on_activate(
   normal_stop_ref_right_ = 0.0;
   zero_stop_hold_ = false;
   quick_stop_active_ = false;
-  no_breakaway_stall_elapsed_s_ = 0.0;
-  no_breakaway_stall_lockout_ = false;
-  no_breakaway_coordinated_guard_.reset();
+  no_breakaway_overspeed_latched_ = false;
   if (experimental_no_breakaway_) {
     left_ladrc_.breakaway_target = 0.0;
     right_ladrc_.breakaway_target = 0.0;
@@ -662,6 +659,24 @@ hardware_interface::return_type Zlac8015dSystemHardware::read(
       hw_velocities_[1] =
         static_cast<double>(val_r) * RPM01_TO_RAD_PER_SEC;
 
+      // Check EVERY TPDO0 frame, including buffered peak samples that a
+      // subsequent frame might otherwise overwrite before write().
+      // This guard applies only to the no-BREAKAWAY experiment.
+      if (experimental_no_breakaway_ && !no_breakaway_overspeed_latched_ &&
+          mimo::wheel_overspeed(
+            {{hw_velocities_[0], hw_velocities_[1]}},
+            mimo_wheel_radius_m_))
+      {
+        no_breakaway_overspeed_latched_ = true;
+        RCLCPP_ERROR(
+          rclcpp::get_logger("Zlac8015dSystemHardware"),
+          "MIMO_WHEEL_OVERSPEED_STOP: measured L=%.3f R=%.3f rad/s, "
+          "wheel radius=%.3f m, threshold=2.0 m/s "
+          "(31.25 rad/s at radius=0.064 m). "
+          "Both wheel currents forced to zero until controller restart.",
+          hw_velocities_[0], hw_velocities_[1], mimo_wheel_radius_m_);
+      }
+
       velocity_feedback_received_ = true;
       last_velocity_feedback_time_ = std::chrono::steady_clock::now();
       feedback_timeout_reported_ = false;
@@ -802,8 +817,7 @@ hardware_interface::return_type Zlac8015dSystemHardware::write(
                     << ",mimo_pid_d_updated,mimo_pid_d_dt_s";
           }
           if (experimental_no_breakaway_) {
-            csv_log << ",coordinated_stall_stop,coordinated_stalled_wheel"
-                    << ",stall_current_timer_s";
+            csv_log << ",wheel_overspeed_latched";
           }
           csv_log << '\n';
 
@@ -868,9 +882,7 @@ hardware_interface::return_type Zlac8015dSystemHardware::write(
                   << "," << mimo_pid_.derivative_sample_dt_s;
         }
         if (experimental_no_breakaway_) {
-          csv_log << "," << static_cast<int>(no_breakaway_coordinated_guard_.latched)
-                  << "," << no_breakaway_coordinated_guard_.stalled_wheel
-                  << "," << no_breakaway_stall_elapsed_s_;
+          csv_log << "," << static_cast<int>(no_breakaway_overspeed_latched_);
         }
         csv_log << '\n';
 
@@ -879,6 +891,17 @@ hardware_interface::return_type Zlac8015dSystemHardware::write(
         }
       }
     };
+
+  // Wheel peripheral speed >= 2.0 m/s is a latched stop, independent
+  // of command reference, startup conditions, and regular stop ramps.
+  // No automatic rearm when wheel speed falls or /cmd_vel becomes zero.
+  if (experimental_no_breakaway_ && no_breakaway_overspeed_latched_) {
+    left_ladrc_.tracking = false;
+    right_ladrc_.tracking = false;
+    send_zero_command(); // CANopen RPDO0: both target currents = 0 mA.
+    log_ladrc_runtime(0.0, 0.0);
+    return hardware_interface::return_type::OK;
+  }
 
   // LADRC and PID current modes require fresh wheel-speed feedback.
   if (!velocity_feedback_received_) {
@@ -1089,25 +1112,13 @@ hardware_interface::return_type Zlac8015dSystemHardware::write(
   // current saturation, and current slew limit remain active.
   // ==========================================================
   if (experimental_no_breakaway_) {
-    // Receiving a stop command re-arms a tripped coordinated safety stop.
-    if (zero_velocity_command) {
-      no_breakaway_coordinated_guard_.reset();
-      no_breakaway_stall_elapsed_s_ = 0.0;
-      no_breakaway_stall_lockout_ = false;
-      left_ladrc_.stall_lockout = false;
-      right_ladrc_.stall_lockout = false;
-    }
-
     const bool active_reference =
       !zero_stop_hold_ &&
       (std::abs(control_ref_l) > 1.0e-6 ||
        std::abs(control_ref_r) > 1.0e-6);
 
-    if (!active_reference ||
-        (no_breakaway_stall_lockout_ &&
-         !no_breakaway_coordinated_guard_.latched)) {
-      // Preserve the existing latched zero-current stop. During a stall
-      // lockout, never restart on a repeated nonzero velocity command.
+    if (!active_reference) {
+      // Normal stop / zero hold. Overspeed lockout is handled above.
       left_ladrc_.tracking = false;
       right_ladrc_.tracking = false;
       mimo_ladrc_.reset();
@@ -1149,51 +1160,6 @@ hardware_interface::return_type Zlac8015dSystemHardware::write(
       log_ladrc_runtime(left_a, right_a);
       return hardware_interface::return_type::OK;
     };
-
-    // Closed-loop [v, yaw] residuals and wheel speeds jointly detect
-    // a blocked drive wheel. Without this guard, identical v/yaw LADRC
-    // bandwidths decouple into two independent wheel controllers.
-    const bool coordinated_stall = no_breakaway_coordinated_guard_.update(
-      {{control_ref_l, control_ref_r}},
-      {{hw_velocities_[0], hw_velocities_[1]}},
-      reference_body[0], measured_body[0],
-      reference_body[1], measured_body[1], dt);
-
-    if (coordinated_stall) {
-      // Protective braking is independent of the normal LADRC law.
-      // Force stalled-wheel current to zero and provide at most 1 A
-      // opposite the measured direction to the still-spinning wheel.
-      // The brake cannot reverse a wheel when it reaches rest.
-      const double left_brake = mimo::coupled_stall_brake_current(
-        hw_velocities_[0], current_l_measured, dt,
-        current_rate_limit_a_per_s_);
-      const double right_brake = mimo::coupled_stall_brake_current(
-        hw_velocities_[1], current_r_measured, dt,
-        current_rate_limit_a_per_s_);
-      if (!no_breakaway_stall_lockout_) {
-        RCLCPP_ERROR(
-          rclcpp::get_logger("Zlac8015dSystemHardware"),
-          "MIMO_COUPLED_STALL_STOP: stalled wheel=%d, "
-          "ref[L,R]=[%.2f,%.2f], vel[L,R]=[%.2f,%.2f], "
-          "ref[v,w]=[%.2f,%.2f], actual[v,w]=[%.2f,%.2f]; "
-          "braking both wheels, latched until zero velocity command.",
-          no_breakaway_coordinated_guard_.stalled_wheel,
-          control_ref_l, control_ref_r,
-          hw_velocities_[0], hw_velocities_[1],
-          reference_body[0], reference_body[1],
-          measured_body[0], measured_body[1]);
-        no_breakaway_stall_lockout_ = true;
-        // Do not reuse stale observer states from the constrained motion
-        // when the operator next issues zero and rearms the stop ramp.
-        mimo_ladrc_.reset();
-        mimo_was_ready_ = false;
-      }
-      left_ladrc_.tracking = false;
-      right_ladrc_.tracking = false;
-      left_ladrc_.stall_lockout = true;
-      right_ladrc_.stall_lockout = true;
-      return send_experimental(left_brake, right_brake);
-    }
 
     if (!mimo_was_ready_) {
       // Initialize ESO at the measured (possibly zero) velocity.
@@ -1248,36 +1214,6 @@ hardware_interface::return_type Zlac8015dSystemHardware::write(
     right_ladrc_.z1 = estimated_wheels[1];
     left_ladrc_.z2 = disturbance_wheels[0];
     right_ladrc_.z2 = disturbance_wheels[1];
-
-    // Zero-speed high-current protection: a stationary motor must not
-    // be held at the new 8 A limit for seconds. After 0.4 s with
-    // current request >=2 A, latch zero until a zero velocity command.
-    const bool left_stuck_at_limit =
-      std::abs(hw_velocities_[0]) < stall_speed_rad_s_ &&
-      std::abs(cmd_l) >= 2.0;
-    const bool right_stuck_at_limit =
-      std::abs(hw_velocities_[1]) < stall_speed_rad_s_ &&
-      std::abs(cmd_r) >= 2.0;
-    if (!zero_velocity_command &&
-        (left_stuck_at_limit || right_stuck_at_limit)) {
-      no_breakaway_stall_elapsed_s_ += dt;
-    } else {
-      no_breakaway_stall_elapsed_s_ = 0.0;
-    }
-    if (no_breakaway_stall_elapsed_s_ >= 0.4) {
-      no_breakaway_stall_lockout_ = true;
-      left_ladrc_.stall_lockout = true;
-      right_ladrc_.stall_lockout = true;
-      left_ladrc_.tracking = false;
-      right_ladrc_.tracking = false;
-      cmd_l = 0.0;
-      cmd_r = 0.0;
-      RCLCPP_ERROR(
-        rclcpp::get_logger("Zlac8015dSystemHardware"),
-        "Experimental no-BREAKAWAY: stationary wheel >=2 A "
-        "for 0.4 s. Current locked to zero; "
-        "issue /cmd_vel=0 before attempting another trial.");
-    }
 
     return send_experimental(cmd_l, cmd_r);
   }
