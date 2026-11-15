@@ -58,13 +58,13 @@ inline double coordinated_ready_target(
 }
 
 // Per-wheel overspeed limit for the experimental torque controller.
-// 5 km/h wheel peripheral speed = 5/3.6 m/s (r=0.064 m -> 21.70139 rad/s).
+// 2.0 m/s wheel peripheral speed (r=0.064 m -> 31.25 rad/s).
 // This is NOT the robot's body-center velocity. Fail closed on invalid
 // geometry or nonfinite encoder feedback.
 inline bool wheel_overspeed(
   const Vec2 & measured_wheel_rad_s,
   const double wheel_radius_m,
-  const double max_peripheral_speed_m_s = 5.0 / 3.6)
+  const double max_peripheral_speed_m_s = 2.0)
 {
   if (!std::isfinite(wheel_radius_m) || wheel_radius_m <= 0.0 ||
       !std::isfinite(max_peripheral_speed_m_s) ||
