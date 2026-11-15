@@ -132,12 +132,16 @@ hardware_interface::CallbackReturn Zlac8015dSystemHardware::on_init(
       control_mode_ = ControlMode::PID_TORQUE;
     } else if (mode == "mimo_ladrc_torque") {
       control_mode_ = ControlMode::MIMO_LADRC_TORQUE;
+    } else if (mode == "mimo_ladrc_no_breakaway") {
+      // Separate experimental mode. Never change the validated stable mode.
+      control_mode_ = ControlMode::MIMO_LADRC_TORQUE;
+      experimental_no_breakaway_ = true;
     } else if (mode == "mimo_pid_torque") {
       control_mode_ = ControlMode::MIMO_PID_TORQUE;
     } else {
       throw std::runtime_error(
         "control_mode must be 'velocity', 'ladrc_torque', 'pid_torque', "
-        "'mimo_ladrc_torque', or 'mimo_pid_torque'");
+        "'mimo_ladrc_torque', 'mimo_ladrc_no_breakaway', or 'mimo_pid_torque'");
     }
     pid_kp_ = get_double_parameter(info_, "pid_kp", 0.7);
     pid_ki_ = get_double_parameter(info_, "pid_ki", 0.5);
@@ -168,6 +172,8 @@ hardware_interface::CallbackReturn Zlac8015dSystemHardware::on_init(
       get_double_parameter(info_, "mimo_pid_kd_v", pid_kd_),
       get_double_parameter(info_, "mimo_pid_kd_omega", pid_kd_)}};
     current_limit_a_ = get_double_parameter(info_, "current_limit_a", 8.0);
+    no_breakaway_current_limit_a_ =
+      get_double_parameter(info_, "no_breakaway_current_limit_a", 1.0);
     current_rate_limit_a_per_s_ =
       get_double_parameter(info_, "current_rate_limit_a_per_s", 20.0);
     feedback_timeout_s_ =
@@ -207,6 +213,21 @@ hardware_interface::CallbackReturn Zlac8015dSystemHardware::on_init(
     RCLCPP_ERROR(
       rclcpp::get_logger("Zlac8015dSystemHardware"),
       "LADRC/current/watchdog parameters must be positive.");
+    return hardware_interface::CallbackReturn::ERROR;
+  }
+
+  // Experimental startup is intentionally current-limited independently of
+  // the general torque mode ceiling. It never exceeds 2 A or Imax.
+  if (experimental_no_breakaway_ &&
+      (!std::isfinite(no_breakaway_current_limit_a_) ||
+       no_breakaway_current_limit_a_ <= 0.0 ||
+       no_breakaway_current_limit_a_ > 2.0 ||
+       no_breakaway_current_limit_a_ > current_limit_a_))
+  {
+    RCLCPP_ERROR(
+      rclcpp::get_logger("Zlac8015dSystemHardware"),
+      "Experimental no-BREAKAWAY current cap must be in (0, 2.0] A "
+      "and not exceed current_limit_a.");
     return hardware_interface::CallbackReturn::ERROR;
   }
 
@@ -298,6 +319,16 @@ hardware_interface::CallbackReturn Zlac8015dSystemHardware::on_init(
     can_interface_.c_str(),
     static_cast<unsigned>(node_id_),
     controller_bandwidth_, observer_bandwidth_, current_limit_a_);
+
+  if (experimental_no_breakaway_) {
+    RCLCPP_WARN(
+      rclcpp::get_logger("Zlac8015dSystemHardware"),
+      "MIMO_LADRC_NO_BREAKAWAY_EXP_20261115_R1 active. "
+      "Open-loop BREAKAWAY disabled; MIMO-LADRC from standstill. "
+      "Experimental Imax=%.2f A, dI/dt=%.2f A/s, "
+      "stall lockout=2.0 s. Not the validated stable controller.",
+      no_breakaway_current_limit_a_, current_rate_limit_a_per_s_);
+  }
 
   // Runtime provenance marker. A source checkout alone does not prove the
   // installed plugin was rebuilt or loaded. This literal is emitted ONLY
@@ -406,6 +437,12 @@ hardware_interface::CallbackReturn Zlac8015dSystemHardware::on_activate(
   normal_stop_ref_right_ = 0.0;
   zero_stop_hold_ = false;
   quick_stop_active_ = false;
+  no_breakaway_stall_elapsed_s_ = 0.0;
+  no_breakaway_stall_lockout_ = false;
+  if (experimental_no_breakaway_) {
+    left_ladrc_.breakaway_target = 0.0;
+    right_ladrc_.breakaway_target = 0.0;
+  }
 
   const uint32_t sdo_id = 0x600u + node_id_;
 
@@ -726,6 +763,8 @@ hardware_interface::return_type Zlac8015dSystemHardware::write(
         const char * log_path =
           control_mode_ == ControlMode::MIMO_PID_TORQUE ?
             "/tmp/mimo_pid_track_200hz.csv" :
+          experimental_no_breakaway_ ?
+            "/tmp/mimo_ladrc_no_breakaway_200hz.csv" :
           control_mode_ == ControlMode::MIMO_LADRC_TORQUE ?
             "/tmp/mimo_ladrc_track_200hz.csv" :
           control_mode_ == ControlMode::PID_TORQUE ?
