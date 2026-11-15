@@ -58,12 +58,13 @@ inline double coordinated_ready_target(
 }
 
 // Per-wheel overspeed limit for the experimental torque controller.
-// Wheel peripheral speed |omega| * radius, not body-center velocity.
-// Fail closed on invalid geometry or nonfinite encoder feedback.
+// 5 km/h wheel peripheral speed = 5/3.6 m/s (r=0.064 m -> 21.70139 rad/s).
+// This is NOT the robot's body-center velocity. Fail closed on invalid
+// geometry or nonfinite encoder feedback.
 inline bool wheel_overspeed(
   const Vec2 & measured_wheel_rad_s,
   const double wheel_radius_m,
-  const double max_peripheral_speed_m_s = 2.0)
+  const double max_peripheral_speed_m_s = 5.0 / 3.6)
 {
   if (!std::isfinite(wheel_radius_m) || wheel_radius_m <= 0.0 ||
       !std::isfinite(max_peripheral_speed_m_s) ||
@@ -72,10 +73,9 @@ inline bool wheel_overspeed(
       !std::isfinite(measured_wheel_rad_s[1])) {
     return true;
   }
-  return std::abs(measured_wheel_rad_s[0]) * wheel_radius_m >=
-           max_peripheral_speed_m_s ||
-         std::abs(measured_wheel_rad_s[1]) * wheel_radius_m >=
-           max_peripheral_speed_m_s;
+  const double limit_rad_s = max_peripheral_speed_m_s / wheel_radius_m;
+  return std::abs(measured_wheel_rad_s[0]) >= limit_rad_s ||
+         std::abs(measured_wheel_rad_s[1]) >= limit_rad_s;
 }
 
 inline Vec2 multiply(const Mat2 & m, const Vec2 & v)
