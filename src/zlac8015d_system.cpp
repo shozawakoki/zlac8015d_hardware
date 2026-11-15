@@ -1183,6 +1183,10 @@ hardware_interface::return_type Zlac8015dSystemHardware::write(
           reference_body[0], reference_body[1],
           measured_body[0], measured_body[1]);
         no_breakaway_stall_lockout_ = true;
+        // Do not reuse stale observer states from the constrained motion
+        // when the operator next issues zero and rearms the stop ramp.
+        mimo_ladrc_.reset();
+        mimo_was_ready_ = false;
       }
       left_ladrc_.tracking = false;
       right_ladrc_.tracking = false;
