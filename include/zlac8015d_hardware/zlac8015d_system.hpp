@@ -123,9 +123,8 @@ private:
   // The stable mimo_ladrc_torque state machine is completely unchanged.
   bool experimental_no_breakaway_{false};
   double no_breakaway_current_limit_a_{8.0};
-  double no_breakaway_stall_elapsed_s_{0.0};
-  bool no_breakaway_stall_lockout_{false};
-  mimo::CoordinatedStallGuard no_breakaway_coordinated_guard_;
+  // Latches until hardware controller reactivation (not cleared by cmd_vel=0).
+  bool no_breakaway_overspeed_latched_{false};
   LadrcState left_ladrc_;
   LadrcState right_ladrc_;
   PidState left_pid_;
