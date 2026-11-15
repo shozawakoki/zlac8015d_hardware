@@ -57,101 +57,25 @@ inline double coordinated_ready_target(
     existing_target_a : std::max(existing_target_a, legacy_wait_a);
 }
 
-// MIMO fault detection must use body yaw tracking as well as individual wheel
-// measurements. Feedback alone cannot satisfy [v, yaw] if a wheel is stuck;
-// instead, latch a coordinated stop when a large yaw residual persists while
-// one commanded wheel is stationary and its partner is moving.
-// Index: 0=left, 1=right; no CAN or ROS dependencies, unit-testable.
-struct CoordinatedStallGuard
+// Per-wheel overspeed limit for the experimental torque controller.
+// Wheel peripheral speed |omega| * radius, not body-center velocity.
+// Fail closed on invalid geometry or nonfinite encoder feedback.
+inline bool wheel_overspeed(
+  const Vec2 & measured_wheel_rad_s,
+  const double wheel_radius_m,
+  const double max_peripheral_speed_m_s = 2.0)
 {
-  double mismatch_duration_s{0.0};
-  bool latched{false};
-  int stalled_wheel{-1};
-
-  void reset()
-  {
-    mismatch_duration_s = 0.0;
-    latched = false;
-    stalled_wheel = -1;
+  if (!std::isfinite(wheel_radius_m) || wheel_radius_m <= 0.0 ||
+      !std::isfinite(max_peripheral_speed_m_s) ||
+      max_peripheral_speed_m_s <= 0.0 ||
+      !std::isfinite(measured_wheel_rad_s[0]) ||
+      !std::isfinite(measured_wheel_rad_s[1])) {
+    return true;
   }
-
-  bool update(
-    const Vec2 & wheel_reference, const Vec2 & wheel_measured,
-    const double linear_reference, const double linear_measured,
-    const double yaw_reference, const double yaw_measured,
-    const double dt)
-  {
-    if (latched) {return true;}
-    if (!std::isfinite(wheel_reference[0]) ||
-        !std::isfinite(wheel_reference[1]) ||
-        !std::isfinite(wheel_measured[0]) ||
-        !std::isfinite(wheel_measured[1]) ||
-        !std::isfinite(linear_reference) || !std::isfinite(linear_measured) ||
-        !std::isfinite(yaw_reference) || !std::isfinite(yaw_measured) ||
-        !std::isfinite(dt) || dt <= 0.0) {
-      mismatch_duration_s = 0.0;
-      return false;
-    }
-
-    constexpr double kMinRequestedWheelSpeed = 1.0; // rad/s
-    constexpr double kStuckSpeed = 0.20; // rad/s
-    constexpr double kOtherWheelMoving = 1.0; // rad/s
-    constexpr double kExcessYaw = 0.35; // rad/s
-    constexpr double kLinearTrackingError = 0.08; // m/s
-    constexpr double kConfirmDuration = 0.15; // s
-
-    const bool both_requested =
-      std::abs(wheel_reference[0]) >= kMinRequestedWheelSpeed &&
-      std::abs(wheel_reference[1]) >= kMinRequestedWheelSpeed;
-    const bool yaw_mismatch =
-      std::abs(yaw_measured - yaw_reference) >= kExcessYaw;
-    const bool linear_mismatch =
-      std::abs(linear_measured - linear_reference) >= kLinearTrackingError;
-    const bool left_stuck =
-      std::abs(wheel_measured[0]) <= kStuckSpeed &&
-      std::abs(wheel_measured[1]) >= kOtherWheelMoving;
-    const bool right_stuck =
-      std::abs(wheel_measured[1]) <= kStuckSpeed &&
-      std::abs(wheel_measured[0]) >= kOtherWheelMoving;
-    if (both_requested && yaw_mismatch && linear_mismatch &&
-        (left_stuck || right_stuck)) {
-      mismatch_duration_s += dt;
-      if (mismatch_duration_s >= kConfirmDuration) {
-        latched = true;
-        stalled_wheel = left_stuck ? 0 : 1;
-      }
-    } else {
-      mismatch_duration_s = 0.0;
-    }
-    return latched;
-  }
-};
-
-// Safety-only deceleration after asymmetric stall. Force the sign opposite
-// to measured motion; never keep applying drive torque in the wrong
-// direction while a wheel is constrained. Normal LADRC is not modified.
-inline double coupled_stall_brake_current(
-  const double measured_speed, const double previous_current,
-  const double dt, const double rate_limit_a_per_s)
-{
-  if (!std::isfinite(measured_speed) ||
-      !std::isfinite(previous_current) || !std::isfinite(dt) ||
-      !std::isfinite(rate_limit_a_per_s) ||
-      dt <= 0.0 || rate_limit_a_per_s <= 0.0)
-  {
-    return 0.0;
-  }
-  if (std::abs(measured_speed) <= 0.10) {return 0.0;}
-  const double target =
-    -std::copysign(std::min(1.0, 0.25 * std::abs(measured_speed)),
-                   measured_speed);
-  const double max_step = rate_limit_a_per_s * dt;
-  const double next = std::max(previous_current - max_step,
-                     std::min(previous_current + max_step, target));
-  // Cut a positive driving current immediately instead of prolonging it
-  // during the initial sign change of an emergency brake.
-  if (next * measured_speed > 0.0) {return 0.0;}
-  return std::max(-1.0, std::min(1.0, next));
+  return std::abs(measured_wheel_rad_s[0]) * wheel_radius_m >=
+           max_peripheral_speed_m_s ||
+         std::abs(measured_wheel_rad_s[1]) * wheel_radius_m >=
+           max_peripheral_speed_m_s;
 }
 
 inline Vec2 multiply(const Mat2 & m, const Vec2 & v)
