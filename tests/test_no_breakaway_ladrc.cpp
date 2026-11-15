@@ -112,6 +112,17 @@ int main()
       {{8.92, 9.77}}, {{0.0, 0.0}},
       0.60, 0.0, 0.15, 0.0, dt));
   }
+  // A triggered guard must brake the moving wheel without applying
+  // extra current to an immobilized wheel.
+  using zlac8015d_hardware::mimo::coupled_stall_brake_current;
+  assert(coupled_stall_brake_current(0.0, 8.0, dt, 20.0) == 0.0);
+  assert(coupled_stall_brake_current(9.77, +1.0, dt, 20.0) == 0.0);
+  assert(std::abs(coupled_stall_brake_current(9.77, 0.0, dt, 20.0)
+                  - (-0.1)) < 1.0e-12);
+  assert(std::abs(coupled_stall_brake_current(-9.77, 0.0, dt, 20.0)
+                  - (+0.1)) < 1.0e-12);
+  assert(coupled_stall_brake_current(9.77, -1.0, dt, 20.0) == -1.0);
+  assert(std::abs(limit_current(10.0, 7.9, 8.0, 20.0, dt) - 8.0) < 1.0e-12);
   // No requirement for actual wheel movement before the LADRC step.
   // Saturation and slew-rate protection still apply.
   std::cout << "No-BREAKAWAY LADRC pure-model tests passed\n";
