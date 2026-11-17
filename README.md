@@ -5,6 +5,8 @@
 起動時に `ZLAC_CONTROL_MODE=mimo_ladrc_no_breakaway` を指定すると、静止状態からMIMO-LADRCを使用し、始動用BREAKAWAY制御を通しません。
 実験モードの通常電流指令上限は8 A/輪、変化率制限は20 A/sです。片輪拘束による両輪連動の制動・低速高電流による連動停止は削除しました。**いずれかの車輪周速度が2.0 m/s（r=0.064 mなら31.25 rad/s、約298.4 rpm）以上になった場合のみ、両輪へ0 Aを指令し、制御プログラム再起動まで停止状態を保持します。** 0 Aは非常停止や機械ブレーキではありません。**手でタイヤを止める試験は行わないでください。**
 
+**MIMO-LADRCの制御コードを学習する場合：** [MIMO_LADRC_NO_BREAKAWAY_STUDY_GUIDE.md](MIMO_LADRC_NO_BREAKAWAY_STUDY_GUIDE.md) に、ESO・制御則・C++関数の対応と、静止状態からの演算順をまとめています。
+
 検証方法、過速度ラッチ、200Hz CSV、安定版への復帰手順は [NO_BREAKAWAY_EXPERIMENT.md](NO_BREAKAWAY_EXPERIMENT.md) を参照してください。
 
 ---
