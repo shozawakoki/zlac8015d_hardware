@@ -94,6 +94,34 @@ int main()
   assert(std::abs(limit_current(10.0, 7.9, 8.0, 20.0, dt) - 8.0) < 1.0e-12);
   assert(std::abs(limit_current(-10.0, -7.9, 8.0, 20.0, dt) + 8.0) < 1.0e-12);
 
+  // The observer's model input is exactly the supplied current.
+  // A smaller *measured* current must not be silently replaced with the
+  // larger commanded current when the new mode selects TPDO1 feedback.
+  Ladrc actual_input_eso;
+  Ladrc command_input_eso;
+  actual_input_eso.reset_to_measurement(model.wheel_to_body(stationary));
+  command_input_eso.reset_to_measurement(model.wheel_to_body(stationary));
+  const Vec2 actual_current{{0.2, -0.1}};
+  const Vec2 commanded_current{{0.8, -0.5}};
+  const auto actual_u = actual_input_eso.step(
+    model, reference, model.wheel_to_body(stationary),
+    actual_current, dt, {{wc, wc}}, {{wo, wo}});
+  const auto commanded_u = command_input_eso.step(
+    model, reference, model.wheel_to_body(stationary),
+    commanded_current, dt, {{wc, wc}}, {{wo, wo}});
+  const auto expected_acceleration_actual =
+    zlac8015d_hardware::mimo::multiply(model.B, actual_current);
+  const auto expected_acceleration_commanded =
+    zlac8015d_hardware::mimo::multiply(model.B, commanded_current);
+  for (int axis = 0; axis < 2; ++axis) {
+    assert(std::abs(actual_input_eso.z1[axis] -
+      dt * expected_acceleration_actual[axis]) < 1.0e-12);
+    assert(std::abs(command_input_eso.z1[axis] -
+      dt * expected_acceleration_commanded[axis]) < 1.0e-12);
+  }
+  assert(std::abs(actual_u[0] - commanded_u[0]) > 1.0e-6);
+  assert(std::abs(actual_u[1] - commanded_u[1]) > 1.0e-6);
+
   // No requirement for actual wheel movement before the LADRC step.
   // Saturation and slew-rate protection still apply.
   std::cout << "No-BREAKAWAY LADRC pure-model tests passed\n";
