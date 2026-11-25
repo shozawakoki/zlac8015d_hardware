@@ -122,6 +122,9 @@ private:
   // Experimental, opt-in only: apply MIMO-LADRC from zero wheel speed.
   // The stable mimo_ladrc_torque state machine is completely unchanged.
   bool experimental_no_breakaway_{false};
+  // Opt-in experiment: TPDO1 actual current drives the MIMO-LESO input.
+  // The original no-BREAKAWAY experiment remains commanded-current based.
+  bool experimental_actual_current_{false};
   double no_breakaway_current_limit_a_{8.0};
   // Latches until hardware controller reactivation (not cleared by cmd_vel=0).
   bool no_breakaway_overspeed_latched_{false};
@@ -167,7 +170,9 @@ private:
   bool velocity_feedback_received_{false};
   bool current_feedback_received_{false};
   std::chrono::steady_clock::time_point last_velocity_feedback_time_{};
+  std::chrono::steady_clock::time_point last_current_feedback_time_{};
   bool feedback_timeout_reported_{false};
+  bool current_feedback_timeout_reported_{false};
 
   // True while the ZLAC8015D is held in CiA402 Quick Stop state.
   bool quick_stop_active_{false};
