@@ -1,5 +1,18 @@
 # 実験版：静止状態からMIMO-LADRCで直接発進（BREAKAWAYなし）
 
+## 追加：ESOに実電流を入力する比較実験
+
+このブランチ `experiment/mimo-ladrc-no-breakaway-actual-current-eso` は、BREAKAWAYなしMIMO-LADRCで**ESOの入力電流だけ**を切り替えられる比較実験用です。`main` は未変更です。
+
+- `ZLAC_CONTROL_MODE=mimo_ladrc_no_breakaway`：従来方式（前周期の指令電流をESOへ入力）
+- `ZLAC_CONTROL_MODE=mimo_ladrc_no_breakaway_actual_current`：新方式（CANopen TPDO1の実電流をESOへ入力）
+
+ゲイン、`b0`、電流上限8 A/輪、変化率20 A/s、制御周期200 Hz、通常停止、2.0 m/s過速度停止は変更しません。新方式は実電流未受信時に0 Aを出力し、フィードバックが既存の30 msタイムアウトを超えた場合も0 Aにしてエラーを返します。従来方式はそのまま残します。
+
+詳細・実験前チェック・オフライン試験・ログは [ACTUAL_CURRENT_ESO_EXPERIMENT.md](ACTUAL_CURRENT_ESO_EXPERIMENT.md) を参照してください。新方式のログは `/tmp/mimo_ladrc_no_breakaway_actual_current_200hz.csv` です。
+
+---
+
 このブランチ `experiment/mimo-ladrc-no-breakaway` は検証用です。採用済みの `release/mimo-ladrc-stable` は変更していません。
 
 起動時に `ZLAC_CONTROL_MODE=mimo_ladrc_no_breakaway` を指定すると、静止状態からMIMO-LADRCを使用し、始動用BREAKAWAY制御を通しません。
