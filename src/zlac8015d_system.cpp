@@ -345,7 +345,9 @@ hardware_interface::CallbackReturn Zlac8015dSystemHardware::on_init(
       RCLCPP_WARN(
         rclcpp::get_logger("Zlac8015dSystemHardware"),
         "MIMO_LADRC_ESO_TPDO1_ACTUAL_CURRENT_20261125_R1 active: "
+        "MIMO_LADRC_ZERO_REFERENCE_CLOSED_LOOP_20261125_R1 active: "
         "LESO uses TPDO1 measured currents [L,R] in ROS-positive sign; "
+        "normal stop ramp/stop FF/ZERO HOLD bypassed; "
         "current feedback timeout=%.1f ms.",
         feedback_timeout_s_ * 1000.0);
     }
@@ -1027,7 +1029,10 @@ hardware_interface::return_type Zlac8015dSystemHardware::write(
       return 0.0;
     };
 
-  if (zero_velocity_command) {
+  // In the measured-current experiment, even a zero velocity command is
+  // sent directly to MIMO-LADRC. Do not run the normal-stop trajectory
+  // generator or switch to ZERO HOLD in that mode. Other modes are unchanged.
+  if (zero_velocity_command && !experimental_actual_current_) {
 
     // ========================================================
     // ZERO HOLD
@@ -1136,7 +1141,9 @@ hardware_interface::return_type Zlac8015dSystemHardware::write(
   }
   else {
 
-    // New non-zero motion command releases ZERO HOLD.
+    // For the measured-current experiment this path also handles zero
+    // reference: it passes hw_commands_ unchanged to MIMO-LADRC.
+    // For the other modes this path releases ZERO HOLD on a nonzero command.
     normal_stop_ramp_active_ = false;
     zero_stop_hold_ = false;
 
@@ -1162,8 +1169,10 @@ hardware_interface::return_type Zlac8015dSystemHardware::write(
   // mimo_ladrc_torque and all PID modes take the existing path below.
   // No open-loop startup currents, READY wait, TRACK current floor,
   // or automatic stall->BREAKAWAY transition are used in this mode.
-  // Feedback freshness, normal stop ramp, zero hold, CAN error check,
-  // current saturation, and current slew limit remain active.
+  // The measured-current sub-mode keeps MIMO-LADRC active at zero reference
+  // without a stop ramp, stop feedforward, or zero-current hold.
+  // Legacy no-BREAKAWAY and all other modes keep their previous stop logic.
+  // Feedback freshness, CAN error checks, current limits and slew remain.
   // ==========================================================
   if (experimental_no_breakaway_) {
     const bool active_reference =
@@ -1171,8 +1180,8 @@ hardware_interface::return_type Zlac8015dSystemHardware::write(
       (std::abs(control_ref_l) > 1.0e-6 ||
        std::abs(control_ref_r) > 1.0e-6);
 
-    if (!active_reference) {
-      // Normal stop / zero hold. Overspeed lockout is handled above.
+    if (!experimental_actual_current_ && !active_reference) {
+      // Legacy normal stop / zero hold. Overspeed lockout handled above.
       left_ladrc_.tracking = false;
       right_ladrc_.tracking = false;
       mimo_ladrc_.reset();
@@ -1226,15 +1235,19 @@ hardware_interface::return_type Zlac8015dSystemHardware::write(
       mimo_was_ready_ = true;
     }
 
-    // Retain the proven soft-stop deceleration feedforward.
-    // Normal zero-command end hold remains a separate safety function.
-    constexpr double STOP_DECEL_RAD_S2 = 15.625;
-    const mimo::Vec2 wheel_stop_ff = {{
-      normal_stop_ramp_active_ && std::abs(control_ref_l) > 1.0e-6 ?
-        -std::copysign(STOP_DECEL_RAD_S2, control_ref_l) : 0.0,
-      normal_stop_ramp_active_ && std::abs(control_ref_r) > 1.0e-6 ?
-        -std::copysign(STOP_DECEL_RAD_S2, control_ref_r) : 0.0}};
-    const auto body_stop_ff = mimo_model_.wheel_to_body(wheel_stop_ff);
+    // Measured-current mode: no stopping acceleration feedforward.
+    // The zero-speed target is tracked by the unmodified LADRC law.
+    // Only the legacy commanded-current experiment uses its old stop FF.
+    mimo::Vec2 body_stop_ff{{0.0, 0.0}};
+    if (!experimental_actual_current_) {
+      constexpr double STOP_DECEL_RAD_S2 = 15.625;
+      const mimo::Vec2 wheel_stop_ff = {{
+        normal_stop_ramp_active_ && std::abs(control_ref_l) > 1.0e-6 ?
+          -std::copysign(STOP_DECEL_RAD_S2, control_ref_l) : 0.0,
+        normal_stop_ramp_active_ && std::abs(control_ref_r) > 1.0e-6 ?
+          -std::copysign(STOP_DECEL_RAD_S2, control_ref_r) : 0.0}};
+      body_stop_ff = mimo_model_.wheel_to_body(wheel_stop_ff);
+    }
     const auto raw = mimo_ladrc_.step(
       mimo_model_, reference_body, measured_body, eso_current_input,
       dt, mimo_wc_, mimo_wo_, body_stop_ff);
