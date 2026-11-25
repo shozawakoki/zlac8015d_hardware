@@ -133,15 +133,21 @@ hardware_interface::CallbackReturn Zlac8015dSystemHardware::on_init(
     } else if (mode == "mimo_ladrc_torque") {
       control_mode_ = ControlMode::MIMO_LADRC_TORQUE;
     } else if (mode == "mimo_ladrc_no_breakaway") {
-      // Separate experimental mode. Never change the validated stable mode.
+      // Original no-BREAKAWAY experiment: commanded-current LESO input.
       control_mode_ = ControlMode::MIMO_LADRC_TORQUE;
       experimental_no_breakaway_ = true;
+    } else if (mode == "mimo_ladrc_no_breakaway_actual_current") {
+      // Alternative with TPDO1 actual-current feedback to the same LESO.
+      control_mode_ = ControlMode::MIMO_LADRC_TORQUE;
+      experimental_no_breakaway_ = true;
+      experimental_actual_current_ = true;
     } else if (mode == "mimo_pid_torque") {
       control_mode_ = ControlMode::MIMO_PID_TORQUE;
     } else {
       throw std::runtime_error(
         "control_mode must be 'velocity', 'ladrc_torque', 'pid_torque', "
-        "'mimo_ladrc_torque', 'mimo_ladrc_no_breakaway', or 'mimo_pid_torque'");
+        "'mimo_ladrc_torque', 'mimo_ladrc_no_breakaway', "
+        "'mimo_ladrc_no_breakaway_actual_current', or 'mimo_pid_torque'");
     }
     pid_kp_ = get_double_parameter(info_, "pid_kp", 0.7);
     pid_ki_ = get_double_parameter(info_, "pid_ki", 0.5);
@@ -302,6 +308,8 @@ hardware_interface::CallbackReturn Zlac8015dSystemHardware::on_init(
   position_initialized_ = false;
   velocity_feedback_received_ = false;
   current_feedback_received_ = false;
+  last_current_feedback_time_ = {};
+  current_feedback_timeout_reported_ = false;
   feedback_timeout_reported_ = false;
   left_ladrc_ = LadrcState{0.0, 0.0, left_ladrc_.b0, 0.0, false};
   right_ladrc_ = LadrcState{0.0, 0.0, right_ladrc_.b0, 0.0, false};
@@ -311,6 +319,7 @@ hardware_interface::CallbackReturn Zlac8015dSystemHardware::on_init(
   RCLCPP_INFO(
     rclcpp::get_logger("Zlac8015dSystemHardware"),
     "Configured mode=%s, CAN=%s, node=%u, wc=%.3f, wo=%.3f, Imax=%.3f A",
+    experimental_actual_current_ ? "mimo_ladrc_no_breakaway_actual_current" :
     experimental_no_breakaway_ ? "mimo_ladrc_no_breakaway" :
     control_mode_ == ControlMode::VELOCITY ? "velocity" :
       (control_mode_ == ControlMode::PID_TORQUE ? "pid_torque" :
@@ -329,6 +338,14 @@ hardware_interface::CallbackReturn Zlac8015dSystemHardware::on_init(
       "Either wheel peripheral speed >=2.0m/s => both currents 0 A, "
       "latched until controller restart.",
       no_breakaway_current_limit_a_, current_rate_limit_a_per_s_);
+    if (experimental_actual_current_) {
+      RCLCPP_WARN(
+        rclcpp::get_logger("Zlac8015dSystemHardware"),
+        "MIMO_LADRC_ESO_TPDO1_ACTUAL_CURRENT_20261125_R1 active: "
+        "LESO uses TPDO1 measured currents [L,R] in ROS-positive sign; "
+        "current feedback timeout=%.1f ms.",
+        feedback_timeout_s_ * 1000.0);
+    }
   }
 
   // Runtime provenance marker. A source checkout alone does not prove the
@@ -397,6 +414,8 @@ hardware_interface::CallbackReturn Zlac8015dSystemHardware::on_activate(
   hw_positions_[1] = 0.0;
   velocity_feedback_received_ = false;
   current_feedback_received_ = false;
+  last_current_feedback_time_ = {};
+  current_feedback_timeout_reported_ = false;
   feedback_timeout_reported_ = false;
   left_ladrc_.z1 = 0.0;
   left_ladrc_.z2 = 0.0;
@@ -694,6 +713,8 @@ hardware_interface::return_type Zlac8015dSystemHardware::read(
       hw_efforts_[0] = -static_cast<double>(val_l) * 0.1;
       hw_efforts_[1] = static_cast<double>(val_r) * 0.1;
       current_feedback_received_ = true;
+      last_current_feedback_time_ = std::chrono::steady_clock::now();
+      current_feedback_timeout_reported_ = false;
     }
     // TPDO2: 6064h actual position, left/right I32 encoder counts.
     else if (frame.can_id == tpdo2_id && frame.can_dlc >= 8) {
@@ -781,6 +802,8 @@ hardware_interface::return_type Zlac8015dSystemHardware::write(
         const char * log_path =
           control_mode_ == ControlMode::MIMO_PID_TORQUE ?
             "/tmp/mimo_pid_track_200hz.csv" :
+          experimental_actual_current_ ?
+            "/tmp/mimo_ladrc_no_breakaway_actual_current_200hz.csv" :
           experimental_no_breakaway_ ?
             "/tmp/mimo_ladrc_no_breakaway_200hz.csv" :
           control_mode_ == ControlMode::MIMO_LADRC_TORQUE ?
@@ -818,6 +841,9 @@ hardware_interface::return_type Zlac8015dSystemHardware::write(
           }
           if (experimental_no_breakaway_) {
             csv_log << ",wheel_overspeed_latched";
+          }
+          if (experimental_actual_current_) {
+            csv_log << ",eso_input_current_left_A,eso_input_current_right_A";
           }
           csv_log << '\n';
 
@@ -884,6 +910,9 @@ hardware_interface::return_type Zlac8015dSystemHardware::write(
         if (experimental_no_breakaway_) {
           csv_log << "," << static_cast<int>(no_breakaway_overspeed_latched_);
         }
+        if (experimental_actual_current_) {
+          csv_log << "," << hw_efforts_[0] << "," << hw_efforts_[1];
+        }
         csv_log << '\n';
 
         if (++csv_flush_count % 200 == 0) {
@@ -922,6 +951,29 @@ hardware_interface::return_type Zlac8015dSystemHardware::write(
       feedback_timeout_reported_ = true;
     }
     return hardware_interface::return_type::ERROR;
+  }
+
+  // Never run the measured-current ESO on an unreceived or stale TPDO1
+  // sample. Reuse the existing timeout parameter (30 ms in the URDF).
+  if (experimental_actual_current_) {
+    if (!current_feedback_received_) {
+      send_zero_command();
+      return hardware_interface::return_type::OK;
+    }
+    const double current_feedback_age =
+      std::chrono::duration<double>(now - last_current_feedback_time_).count();
+    if (current_feedback_age > feedback_timeout_s_) {
+      send_zero_command();
+      if (!current_feedback_timeout_reported_) {
+        RCLCPP_ERROR(
+          rclcpp::get_logger("Zlac8015dSystemHardware"),
+          "Actual current TPDO1 timeout: %.1f ms > %.1f ms. "
+          "Torque command forced to zero.",
+          current_feedback_age * 1000.0, feedback_timeout_s_ * 1000.0);
+        current_feedback_timeout_reported_ = true;
+      }
+      return hardware_interface::return_type::ERROR;
+    }
   }
 
   double dt = period.seconds();
@@ -1092,10 +1144,9 @@ hardware_interface::return_type Zlac8015dSystemHardware::write(
     control_ref_r = hw_commands_[1];
   }
 
-  // LESO input: previous-cycle commanded current.
-  // This defines the LADRC plant input as the current command sent
-  // to the motor driver. Current-loop dynamics and command/actual
-  // current mismatch are then absorbed into z2 as total disturbance.
+  // Existing modes use the previous commanded currents as their LESO input.
+  // This same command history is retained for the output slew-rate limiter.
+  // Only the opt-in actual-current mode replaces the LESO input with TPDO1.
   const double current_l_measured =
     left_ladrc_.last_current_cmd;
   const double current_r_measured =
@@ -1133,8 +1184,12 @@ hardware_interface::return_type Zlac8015dSystemHardware::write(
         {{hw_velocities_[0], hw_velocities_[1]}});
     const mimo::Vec2 reference_body =
       mimo_model_.wheel_to_body({{control_ref_l, control_ref_r}});
-    const mimo::Vec2 previous_current =
-      {{current_l_measured, current_r_measured}};
+    // hw_efforts_ is converted from TPDO1 object 6077h [0.1 A/count].
+    // read() already reversed the left motor sign to ROS-positive forward.
+    // The other modes keep the previous commanded-current input.
+    const mimo::Vec2 eso_current_input = experimental_actual_current_ ?
+      mimo::Vec2{{hw_efforts_[0], hw_efforts_[1]}} :
+      mimo::Vec2{{current_l_measured, current_r_measured}};
 
     // Use exactly the same motor-current CANopen encoding as in TRACK.
     const auto send_experimental = [&](const double left_a,
@@ -1178,7 +1233,7 @@ hardware_interface::return_type Zlac8015dSystemHardware::write(
         -std::copysign(STOP_DECEL_RAD_S2, control_ref_r) : 0.0}};
     const auto body_stop_ff = mimo_model_.wheel_to_body(wheel_stop_ff);
     const auto raw = mimo_ladrc_.step(
-      mimo_model_, reference_body, measured_body, previous_current,
+      mimo_model_, reference_body, measured_body, eso_current_input,
       dt, mimo_wc_, mimo_wo_, body_stop_ff);
 
     if (!std::isfinite(raw[0]) || !std::isfinite(raw[1])) {
