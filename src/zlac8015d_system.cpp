@@ -13,6 +13,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <cstdlib>
 #include <fstream>
 #include <iomanip>
 #include <limits>
@@ -116,26 +117,87 @@ hardware_interface::CallbackReturn Zlac8015dSystemHardware::on_init(
     }
     node_id_ = static_cast<uint8_t>(node_id);
 
-    const std::string mode =
+    std::string mode =
       get_string_parameter(info_, "control_mode", "velocity");
+    // Allows selection at ros2 launch without modifying the bringup URDF.
+    // Mode changes require a stop/restart, not a live motor-mode switch.
+    if (const char * env_mode = std::getenv("ZLAC_CONTROL_MODE")) {
+      if (*env_mode != '\0') { mode = env_mode; }
+    }
     if (mode == "velocity") {
       control_mode_ = ControlMode::VELOCITY;
     } else if (mode == "ladrc_torque") {
       control_mode_ = ControlMode::LADRC_TORQUE;
+    } else if (mode == "pid_torque") {
+      control_mode_ = ControlMode::PID_TORQUE;
+    } else if (mode == "mimo_ladrc_torque") {
+      control_mode_ = ControlMode::MIMO_LADRC_TORQUE;
+    } else if (mode == "mimo_ladrc_no_breakaway") {
+      // Separate experimental mode. Never change the validated stable mode.
+      control_mode_ = ControlMode::MIMO_LADRC_TORQUE;
+      experimental_no_breakaway_ = true;
+    } else if (mode == "mimo_pid_torque") {
+      control_mode_ = ControlMode::MIMO_PID_TORQUE;
     } else {
       throw std::runtime_error(
-        "control_mode must be 'velocity' or 'ladrc_torque'");
+        "control_mode must be 'velocity', 'ladrc_torque', 'pid_torque', "
+        "'mimo_ladrc_torque', 'mimo_ladrc_no_breakaway', or 'mimo_pid_torque'");
     }
+    pid_kp_ = get_double_parameter(info_, "pid_kp", 0.7);
+    pid_ki_ = get_double_parameter(info_, "pid_ki", 0.5);
+    pid_kd_ = get_double_parameter(info_, "pid_kd", 0.03);
+    pid_derivative_filter_tau_s_ =
+      get_double_parameter(info_, "pid_derivative_filter_tau_s", 0.05);
 
     left_ladrc_.b0 = get_double_parameter(info_, "ladrc_b0_left", 1.0);
     right_ladrc_.b0 = get_double_parameter(info_, "ladrc_b0_right", 1.0);
     controller_bandwidth_ = get_double_parameter(info_, "ladrc_wc", 5.0);
     observer_bandwidth_ = get_double_parameter(info_, "ladrc_wo", 20.0);
+    mimo_wheel_radius_m_ = get_double_parameter(info_, "mimo_wheel_radius", 0.064);
+    mimo_wheel_separation_m_ =
+      get_double_parameter(info_, "mimo_wheel_separation", 0.354);
+    mimo_wc_ = {{
+      get_double_parameter(info_, "mimo_wc_v", controller_bandwidth_),
+      get_double_parameter(info_, "mimo_wc_omega", controller_bandwidth_)}};
+    mimo_wo_ = {{
+      get_double_parameter(info_, "mimo_wo_v", observer_bandwidth_),
+      get_double_parameter(info_, "mimo_wo_omega", observer_bandwidth_)}};
+    mimo_pid_kp_ = {{
+      get_double_parameter(info_, "mimo_pid_kp_v", pid_kp_),
+      get_double_parameter(info_, "mimo_pid_kp_omega", pid_kp_)}};
+    mimo_pid_ki_ = {{
+      get_double_parameter(info_, "mimo_pid_ki_v", pid_ki_),
+      get_double_parameter(info_, "mimo_pid_ki_omega", pid_ki_)}};
+    mimo_pid_kd_ = {{
+      get_double_parameter(info_, "mimo_pid_kd_v", pid_kd_),
+      get_double_parameter(info_, "mimo_pid_kd_omega", pid_kd_)}};
     current_limit_a_ = get_double_parameter(info_, "current_limit_a", 8.0);
+    no_breakaway_current_limit_a_ =
+      get_double_parameter(info_, "no_breakaway_current_limit_a", 8.0);
     current_rate_limit_a_per_s_ =
       get_double_parameter(info_, "current_rate_limit_a_per_s", 20.0);
     feedback_timeout_s_ =
       get_double_parameter(info_, "feedback_timeout_ms", 30.0) / 1000.0;
+
+    // Start/recovery parameters are distinct from PID/LADRC gains.
+    breakaway_start_a_ =
+      get_double_parameter(info_, "breakaway_start_a", 0.65);
+    breakaway_step_a_ =
+      get_double_parameter(info_, "breakaway_step_a", 0.10);
+    breakaway_max_a_ =
+      get_double_parameter(info_, "breakaway_max_a", 2.0);
+    breakaway_step_samples_ =
+      get_int_parameter(info_, "breakaway_step_samples", 20);
+    breakaway_start_speed_rad_s_ =
+      get_double_parameter(info_, "breakaway_start_speed_rad_s", 0.30);
+    breakaway_start_samples_ =
+      get_int_parameter(info_, "breakaway_start_samples", 6);
+    stall_speed_rad_s_ =
+      get_double_parameter(info_, "stall_speed_rad_s", 0.10);
+    stall_samples_ =
+      get_int_parameter(info_, "stall_samples", 80);
+    stall_min_drive_current_a_ =
+      get_double_parameter(info_, "stall_min_drive_current_a", 0.20);
   } catch (const std::exception & e) {
     RCLCPP_ERROR(
       rclcpp::get_logger("Zlac8015dSystemHardware"),
@@ -154,6 +216,83 @@ hardware_interface::CallbackReturn Zlac8015dSystemHardware::on_init(
     return hardware_interface::CallbackReturn::ERROR;
   }
 
+  // Experimental LADRC current commands can reach 8 A as requested.
+  // Independent 2.0 m/s wheel-overspeed protection commands both wheels 0 A.
+  if (experimental_no_breakaway_ &&
+      (!std::isfinite(no_breakaway_current_limit_a_) ||
+       no_breakaway_current_limit_a_ <= 0.0 ||
+       no_breakaway_current_limit_a_ > 8.0 ||
+       no_breakaway_current_limit_a_ > current_limit_a_))
+  {
+    RCLCPP_ERROR(
+      rclcpp::get_logger("Zlac8015dSystemHardware"),
+      "Experimental no-BREAKAWAY current cap must be in (0, 8.0] A "
+      "and not exceed current_limit_a.");
+    return hardware_interface::CallbackReturn::ERROR;
+  }
+
+  if (!std::isfinite(breakaway_start_a_) ||
+      !std::isfinite(breakaway_step_a_) ||
+      !std::isfinite(breakaway_max_a_) ||
+      !std::isfinite(breakaway_start_speed_rad_s_) ||
+      !std::isfinite(stall_speed_rad_s_) ||
+      !std::isfinite(stall_min_drive_current_a_) ||
+      breakaway_start_a_ <= 0.0 ||
+      breakaway_step_a_ <= 0.0 ||
+      breakaway_max_a_ < breakaway_start_a_ ||
+      breakaway_max_a_ > current_limit_a_ ||
+      breakaway_step_samples_ < 1 || breakaway_step_samples_ > 2000 ||
+      breakaway_start_speed_rad_s_ <= 0.0 ||
+      breakaway_start_samples_ < 1 || breakaway_start_samples_ > 500 ||
+      stall_speed_rad_s_ <= 0.0 ||
+      stall_samples_ < 1 || stall_samples_ > 5000 ||
+      stall_min_drive_current_a_ <= 0.0 ||
+      stall_min_drive_current_a_ > current_limit_a_)
+  {
+    RCLCPP_ERROR(rclcpp::get_logger("Zlac8015dSystemHardware"),
+      "Invalid BREAKAWAY or stall-recovery thresholds.");
+    return hardware_interface::CallbackReturn::ERROR;
+  }
+
+  if (!std::isfinite(pid_kp_) || !std::isfinite(pid_ki_) ||
+      !std::isfinite(pid_kd_) ||
+      !std::isfinite(pid_derivative_filter_tau_s_) ||
+      pid_kp_ < 0.0 || pid_ki_ < 0.0 || pid_kd_ < 0.0 ||
+      (pid_kp_ + pid_ki_ + pid_kd_) <= 0.0 ||
+      pid_derivative_filter_tau_s_ <= 0.0)
+  {
+    RCLCPP_ERROR(rclcpp::get_logger("Zlac8015dSystemHardware"),
+      "Invalid PID gains or derivative filter constant.");
+    return hardware_interface::CallbackReturn::ERROR;
+  }
+  // Input matrix B=T*diag(b0_left,b0_right), order [left,right].
+  if (!std::isfinite(mimo_wheel_radius_m_) || mimo_wheel_radius_m_ <= 0.0 ||
+      !std::isfinite(mimo_wheel_separation_m_) || mimo_wheel_separation_m_ <= 0.0 ||
+      !std::isfinite(left_ladrc_.b0) || !std::isfinite(right_ladrc_.b0))
+  {
+    RCLCPP_ERROR(rclcpp::get_logger("Zlac8015dSystemHardware"),
+      "Invalid MIMO wheel geometry or nominal b0.");
+    return hardware_interface::CallbackReturn::ERROR;
+  }
+  for (size_t i = 0; i < 2; ++i) {
+    if (!std::isfinite(mimo_wc_[i]) || mimo_wc_[i] <= 0.0 ||
+        !std::isfinite(mimo_wo_[i]) || mimo_wo_[i] <= 0.0 ||
+        !std::isfinite(mimo_pid_kp_[i]) || mimo_pid_kp_[i] < 0.0 ||
+        !std::isfinite(mimo_pid_ki_[i]) || mimo_pid_ki_[i] < 0.0 ||
+        !std::isfinite(mimo_pid_kd_[i]) || mimo_pid_kd_[i] < 0.0 ||
+        (mimo_pid_kp_[i] + mimo_pid_ki_[i] + mimo_pid_kd_[i]) <= 0.0)
+    {
+      RCLCPP_ERROR(rclcpp::get_logger("Zlac8015dSystemHardware"),
+        "Invalid MIMO LADRC / PID gains.");
+      return hardware_interface::CallbackReturn::ERROR;
+    }
+  }
+  mimo_model_ = mimo::DifferentialDriveModel(
+    mimo_wheel_radius_m_, mimo_wheel_separation_m_,
+    left_ladrc_.b0, right_ladrc_.b0);
+  mimo_ladrc_.reset();
+  mimo_pid_.reset();
+  mimo_was_ready_ = false;
   raw_position_left_ = 0;
   raw_position_right_ = 0;
   last_raw_position_left_ = 0;
@@ -166,14 +305,43 @@ hardware_interface::CallbackReturn Zlac8015dSystemHardware::on_init(
   feedback_timeout_reported_ = false;
   left_ladrc_ = LadrcState{0.0, 0.0, left_ladrc_.b0, 0.0, false};
   right_ladrc_ = LadrcState{0.0, 0.0, right_ladrc_.b0, 0.0, false};
+  left_pid_ = PidState{};
+  right_pid_ = PidState{};
 
   RCLCPP_INFO(
     rclcpp::get_logger("Zlac8015dSystemHardware"),
     "Configured mode=%s, CAN=%s, node=%u, wc=%.3f, wo=%.3f, Imax=%.3f A",
-    control_mode_ == ControlMode::VELOCITY ? "velocity" : "ladrc_torque",
+    experimental_no_breakaway_ ? "mimo_ladrc_no_breakaway" :
+    control_mode_ == ControlMode::VELOCITY ? "velocity" :
+      (control_mode_ == ControlMode::PID_TORQUE ? "pid_torque" :
+         control_mode_ == ControlMode::MIMO_LADRC_TORQUE ? "mimo_ladrc_torque" :
+         control_mode_ == ControlMode::MIMO_PID_TORQUE ? "mimo_pid_torque" :
+         "ladrc_torque"),
     can_interface_.c_str(),
     static_cast<unsigned>(node_id_),
     controller_bandwidth_, observer_bandwidth_, current_limit_a_);
+
+  if (experimental_no_breakaway_) {
+    RCLCPP_WARN(
+      rclcpp::get_logger("Zlac8015dSystemHardware"),
+      "MIMO_LADRC_NO_BREAKAWAY_EXP_20261115_R5 active. "
+      "BREAKAWAY disabled; Imax=%.2f A, dI/dt=%.2f A/s. "
+      "Either wheel peripheral speed >=2.0m/s => both currents 0 A, "
+      "latched until controller restart.",
+      no_breakaway_current_limit_a_, current_rate_limit_a_per_s_);
+  }
+
+  // Runtime provenance marker. A source checkout alone does not prove the
+  // installed plugin was rebuilt or loaded. This literal is emitted ONLY
+  // from the active compiled plugin, then archived by the launch recorder.
+  if (control_mode_ == ControlMode::MIMO_LADRC_TORQUE ||
+      control_mode_ == ControlMode::MIMO_PID_TORQUE)
+  {
+    RCLCPP_INFO(
+      rclcpp::get_logger("Zlac8015dSystemHardware"),
+      "MIMO_TRANSITION_FIX_20261113_R2 active: "
+      "direction-independent moving TRACK gate, READY current hold");
+  }
 
   return hardware_interface::CallbackReturn::SUCCESS;
 }
@@ -237,8 +405,10 @@ hardware_interface::CallbackReturn Zlac8015dSystemHardware::on_activate(
   left_ladrc_.tracking = false;
   left_ladrc_.start_count = 0;
   left_ladrc_.stall_count = 0;
+  left_ladrc_.stall_recovery_attempts = 0;
+  left_ladrc_.stall_lockout = false;
   left_ladrc_.breakaway_count = 0;
-  left_ladrc_.breakaway_target = 0.65;
+  left_ladrc_.breakaway_target = breakaway_start_a_;
   left_ladrc_.track_hold_count = 0;
   left_ladrc_.track_hold_start = 0.20;
   left_ladrc_.direction_sign = 0;
@@ -250,11 +420,29 @@ hardware_interface::CallbackReturn Zlac8015dSystemHardware::on_activate(
   right_ladrc_.tracking = false;
   right_ladrc_.start_count = 0;
   right_ladrc_.stall_count = 0;
+  right_ladrc_.stall_recovery_attempts = 0;
+  right_ladrc_.stall_lockout = false;
   right_ladrc_.breakaway_count = 0;
-  right_ladrc_.breakaway_target = 0.65;
+  right_ladrc_.breakaway_target = breakaway_start_a_;
   right_ladrc_.track_hold_count = 0;
   right_ladrc_.track_hold_start = 0.20;
   right_ladrc_.direction_sign = 0;
+  left_pid_ = PidState{};
+  right_pid_ = PidState{};
+  sync_track_count_ = 0;
+  mimo_ladrc_.reset();
+  mimo_pid_.reset();
+  mimo_was_ready_ = false;
+  normal_stop_ramp_active_ = false;
+  normal_stop_ref_left_ = 0.0;
+  normal_stop_ref_right_ = 0.0;
+  zero_stop_hold_ = false;
+  quick_stop_active_ = false;
+  no_breakaway_overspeed_latched_ = false;
+  if (experimental_no_breakaway_) {
+    left_ladrc_.breakaway_target = 0.0;
+    right_ladrc_.breakaway_target = 0.0;
+  }
 
   const uint32_t sdo_id = 0x600u + node_id_;
 
@@ -353,8 +541,12 @@ hardware_interface::CallbackReturn Zlac8015dSystemHardware::on_activate(
 
   RCLCPP_INFO(
     rclcpp::get_logger("Zlac8015dSystemHardware"),
-    "Activated %s mode. Velocity/current TPDO period=5 ms, position TPDO period=20 ms.",
-    control_mode_ == ControlMode::VELOCITY ? "velocity" : "LADRC torque");
+    "Activated %s mode. TPDO event timer: velocity/current=10, position=40.",
+    control_mode_ == ControlMode::VELOCITY ? "velocity" :
+      (control_mode_ == ControlMode::PID_TORQUE ? "PID torque" :
+         control_mode_ == ControlMode::MIMO_LADRC_TORQUE ? "MIMO LADRC torque" :
+         control_mode_ == ControlMode::MIMO_PID_TORQUE ? "MIMO PID torque" :
+         "LADRC torque"));
 
   if (control_mode_ == ControlMode::LADRC_TORQUE) {
     RCLCPP_INFO(
@@ -363,6 +555,11 @@ hardware_interface::CallbackReturn Zlac8015dSystemHardware::on_activate(
       left_ladrc_.b0, right_ladrc_.b0,
       controller_bandwidth_, observer_bandwidth_,
       current_limit_a_, current_rate_limit_a_per_s_);
+  } else if (control_mode_ == ControlMode::PID_TORQUE ||
+             control_mode_ == ControlMode::MIMO_PID_TORQUE) {
+    RCLCPP_INFO(rclcpp::get_logger("Zlac8015dSystemHardware"),
+      "PID: Kp=%.3f Ki=%.3f Kd=%.3f tau=%.3f s Imax=%.2f A",
+      pid_kp_, pid_ki_, pid_kd_, pid_derivative_filter_tau_s_, current_limit_a_);
   }
 
   return hardware_interface::CallbackReturn::SUCCESS;
@@ -462,6 +659,24 @@ hardware_interface::return_type Zlac8015dSystemHardware::read(
       hw_velocities_[1] =
         static_cast<double>(val_r) * RPM01_TO_RAD_PER_SEC;
 
+      // Check EVERY TPDO0 frame, including buffered peak samples that a
+      // subsequent frame might otherwise overwrite before write().
+      // This guard applies only to the no-BREAKAWAY experiment.
+      if (experimental_no_breakaway_ && !no_breakaway_overspeed_latched_ &&
+          mimo::wheel_overspeed(
+            {{hw_velocities_[0], hw_velocities_[1]}},
+            mimo_wheel_radius_m_))
+      {
+        no_breakaway_overspeed_latched_ = true;
+        RCLCPP_ERROR(
+          rclcpp::get_logger("Zlac8015dSystemHardware"),
+          "MIMO_WHEEL_OVERSPEED_STOP: measured L=%.3f R=%.3f rad/s, "
+          "wheel radius=%.3f m, threshold=2.0 m/s "
+          "(31.25 rad/s at radius=0.064 m). "
+          "Both wheel currents forced to zero until controller restart.",
+          hw_velocities_[0], hw_velocities_[1], mimo_wheel_radius_m_);
+      }
+
       velocity_feedback_received_ = true;
       last_velocity_feedback_time_ = std::chrono::steady_clock::now();
       feedback_timeout_reported_ = false;
@@ -544,10 +759,14 @@ hardware_interface::return_type Zlac8015dSystemHardware::write(
     return hardware_interface::return_type::OK;
   }
 
+  const bool mimo_mode =
+    control_mode_ == ControlMode::MIMO_LADRC_TORQUE ||
+    control_mode_ == ControlMode::MIMO_PID_TORQUE;
+
   // ==========================================================
-  // 200 Hz LADRC runtime CSV logger
+  // 200 Hz LADRC/PID runtime CSV logger
   //
-  // Called from both normal LADRC operation and Quick Stop.
+  // Observer columns in PID mode are diagnostics, not LESO estimates.
   // ==========================================================
   auto log_ladrc_runtime =
     [&](const double cmd_current_l,
@@ -559,9 +778,16 @@ hardware_interface::return_type Zlac8015dSystemHardware::write(
       static int csv_flush_count = 0;
 
       if (!csv_initialized) {
-        csv_log.open(
-          "/tmp/ladrc_track_200hz.csv",
-          std::ios::out | std::ios::trunc);
+        const char * log_path =
+          control_mode_ == ControlMode::MIMO_PID_TORQUE ?
+            "/tmp/mimo_pid_track_200hz.csv" :
+          experimental_no_breakaway_ ?
+            "/tmp/mimo_ladrc_no_breakaway_200hz.csv" :
+          control_mode_ == ControlMode::MIMO_LADRC_TORQUE ?
+            "/tmp/mimo_ladrc_track_200hz.csv" :
+          control_mode_ == ControlMode::PID_TORQUE ?
+            "/tmp/pid_track_200hz.csv" : "/tmp/ladrc_track_200hz.csv";
+        csv_log.open(log_path, std::ios::out | std::ios::trunc);
 
         if (csv_log.is_open()) {
           csv_log
@@ -574,8 +800,26 @@ hardware_interface::return_type Zlac8015dSystemHardware::write(
             << "z1_left,z1_right,"
             << "z2_left,z2_right,"
             << "tracking_left,tracking_right,"
-            << "breakaway_target_left_A,breakaway_target_right_A"
-            << '\n';
+            << "breakaway_target_left_A,breakaway_target_right_A,"
+            << "stall_lockout_left,stall_lockout_right";
+          if (control_mode_ == ControlMode::PID_TORQUE) {
+            csv_log
+              << ",pid_integral_left_A,pid_integral_right_A"
+              << ",pid_dvel_left_rad_s2,pid_dvel_right_rad_s2";
+          }
+          if (mimo_mode) {
+            csv_log << ",ref_v_m_s,ref_omega_rad_s"
+                    << ",v_m_s,omega_rad_s"
+                    << ",hat_v_m_s,hat_omega_rad_s"
+                    << ",hat_d_v_m_s2,hat_d_omega_rad_s2"
+                    << ",mimo_pid_integral_v,mimo_pid_integral_omega"
+                    << ",mimo_pid_d_v_m_s2,mimo_pid_d_omega_rad_s2"
+                    << ",mimo_pid_d_updated,mimo_pid_d_dt_s";
+          }
+          if (experimental_no_breakaway_) {
+            csv_log << ",wheel_overspeed_latched";
+          }
+          csv_log << '\n';
 
           csv_log << std::setprecision(10);
           csv_start_time = std::chrono::steady_clock::now();
@@ -609,8 +853,38 @@ hardware_interface::return_type Zlac8015dSystemHardware::write(
           << static_cast<int>(left_ladrc_.tracking) << ","
           << static_cast<int>(right_ladrc_.tracking) << ","
           << left_ladrc_.breakaway_target << ","
-          << right_ladrc_.breakaway_target
-          << '\n';
+          << right_ladrc_.breakaway_target << ","
+          << static_cast<int>(left_ladrc_.stall_lockout) << ","
+          << static_cast<int>(right_ladrc_.stall_lockout);
+        if (control_mode_ == ControlMode::PID_TORQUE) {
+          csv_log
+            << "," << left_pid_.integral_current
+            << "," << right_pid_.integral_current
+            << "," << left_pid_.filtered_velocity_derivative
+            << "," << right_pid_.filtered_velocity_derivative;
+        }
+        if (mimo_mode) {
+          const auto ref_body = mimo_model_.wheel_to_body(
+            {{hw_commands_[0], hw_commands_[1]}});
+          const auto measured_body = mimo_model_.wheel_to_body(
+            {{hw_velocities_[0], hw_velocities_[1]}});
+          const auto & est = mimo_ladrc_.z1;
+          const auto & disturbance = mimo_ladrc_.z2;
+          csv_log << "," << ref_body[0] << "," << ref_body[1]
+                  << "," << measured_body[0] << "," << measured_body[1]
+                  << "," << est[0] << "," << est[1]
+                  << "," << disturbance[0] << "," << disturbance[1]
+                  << "," << mimo_pid_.integral_error[0]
+                  << "," << mimo_pid_.integral_error[1]
+                  << "," << mimo_pid_.filtered_derivative[0]
+                  << "," << mimo_pid_.filtered_derivative[1]
+                  << "," << static_cast<int>(mimo_pid_.derivative_updated)
+                  << "," << mimo_pid_.derivative_sample_dt_s;
+        }
+        if (experimental_no_breakaway_) {
+          csv_log << "," << static_cast<int>(no_breakaway_overspeed_latched_);
+        }
+        csv_log << '\n';
 
         if (++csv_flush_count % 200 == 0) {
           csv_log.flush();
@@ -618,7 +892,18 @@ hardware_interface::return_type Zlac8015dSystemHardware::write(
       }
     };
 
-  // LADRC torque mode requires fresh velocity feedback.
+  // Wheel peripheral speed >= 2.0 m/s is a latched stop, independent
+  // of command reference, startup conditions, and regular stop ramps.
+  // No automatic rearm when wheel speed falls or /cmd_vel becomes zero.
+  if (experimental_no_breakaway_ && no_breakaway_overspeed_latched_) {
+    left_ladrc_.tracking = false;
+    right_ladrc_.tracking = false;
+    send_zero_command(); // CANopen RPDO0: both target currents = 0 mA.
+    log_ladrc_runtime(0.0, 0.0);
+    return hardware_interface::return_type::OK;
+  }
+
+  // LADRC and PID current modes require fresh wheel-speed feedback.
   if (!velocity_feedback_received_) {
     send_zero_command();
     return hardware_interface::return_type::OK;
@@ -816,6 +1101,123 @@ hardware_interface::return_type Zlac8015dSystemHardware::write(
   const double current_r_measured =
     right_ladrc_.last_current_cmd;
 
+  // ==========================================================
+  // EXPERIMENT: MIMO-LADRC from standstill, without BREAKAWAY.
+  //
+  // A separate explicit mode is required. The validated stable
+  // mimo_ladrc_torque and all PID modes take the existing path below.
+  // No open-loop startup currents, READY wait, TRACK current floor,
+  // or automatic stall->BREAKAWAY transition are used in this mode.
+  // Feedback freshness, normal stop ramp, zero hold, CAN error check,
+  // current saturation, and current slew limit remain active.
+  // ==========================================================
+  if (experimental_no_breakaway_) {
+    const bool active_reference =
+      !zero_stop_hold_ &&
+      (std::abs(control_ref_l) > 1.0e-6 ||
+       std::abs(control_ref_r) > 1.0e-6);
+
+    if (!active_reference) {
+      // Normal stop / zero hold. Overspeed lockout is handled above.
+      left_ladrc_.tracking = false;
+      right_ladrc_.tracking = false;
+      mimo_ladrc_.reset();
+      mimo_was_ready_ = false;
+      send_zero_command();
+      log_ladrc_runtime(0.0, 0.0);
+      return hardware_interface::return_type::OK;
+    }
+
+    const mimo::Vec2 measured_body =
+      mimo_model_.wheel_to_body(
+        {{hw_velocities_[0], hw_velocities_[1]}});
+    const mimo::Vec2 reference_body =
+      mimo_model_.wheel_to_body({{control_ref_l, control_ref_r}});
+    const mimo::Vec2 previous_current =
+      {{current_l_measured, current_r_measured}};
+
+    // Use exactly the same motor-current CANopen encoding as in TRACK.
+    const auto send_experimental = [&](const double left_a,
+                                    const double right_a)
+      -> hardware_interface::return_type
+    {
+      left_ladrc_.last_current_cmd = left_a;
+      right_ladrc_.last_current_cmd = right_a;
+      const int16_t left_ma = static_cast<int16_t>(
+        std::lround(clamp(-left_a * 1000.0, -30000.0, 30000.0)));
+      const int16_t right_ma = static_cast<int16_t>(
+        std::lround(clamp(right_a * 1000.0, -30000.0, 30000.0)));
+      struct can_frame experimental_frame {};
+      experimental_frame.can_id = 0x200u + node_id_;
+      experimental_frame.can_dlc = 4;
+      std::memcpy(&experimental_frame.data[0], &left_ma, sizeof(left_ma));
+      std::memcpy(&experimental_frame.data[2], &right_ma, sizeof(right_ma));
+      if (::write(can_socket_, &experimental_frame,
+                  sizeof(experimental_frame)) <= 0)
+      {
+        return hardware_interface::return_type::ERROR;
+      }
+      log_ladrc_runtime(left_a, right_a);
+      return hardware_interface::return_type::OK;
+    };
+
+    if (!mimo_was_ready_) {
+      // Initialize ESO at the measured (possibly zero) velocity.
+      // Do not reset on direction changes or while the wheels stall.
+      mimo_ladrc_.reset_to_measurement(measured_body);
+      mimo_was_ready_ = true;
+    }
+
+    // Retain the proven soft-stop deceleration feedforward.
+    // Normal zero-command end hold remains a separate safety function.
+    constexpr double STOP_DECEL_RAD_S2 = 15.625;
+    const mimo::Vec2 wheel_stop_ff = {{
+      normal_stop_ramp_active_ && std::abs(control_ref_l) > 1.0e-6 ?
+        -std::copysign(STOP_DECEL_RAD_S2, control_ref_l) : 0.0,
+      normal_stop_ramp_active_ && std::abs(control_ref_r) > 1.0e-6 ?
+        -std::copysign(STOP_DECEL_RAD_S2, control_ref_r) : 0.0}};
+    const auto body_stop_ff = mimo_model_.wheel_to_body(wheel_stop_ff);
+    const auto raw = mimo_ladrc_.step(
+      mimo_model_, reference_body, measured_body, previous_current,
+      dt, mimo_wc_, mimo_wo_, body_stop_ff);
+
+    if (!std::isfinite(raw[0]) || !std::isfinite(raw[1])) {
+      RCLCPP_ERROR(
+        rclcpp::get_logger("Zlac8015dSystemHardware"),
+        "Non-finite experimental LADRC current; commanding zero.");
+      send_zero_command();
+      return hardware_interface::return_type::ERROR;
+    }
+
+    // Apply LADRC from the first motion sample with requested 8 A cap.
+    // 20 A/s slew limiter prevents an instantaneous 8 A step.
+    const double imax = no_breakaway_current_limit_a_;
+    const double di = current_rate_limit_a_per_s_ * dt;
+    double cmd_l = clamp(
+      clamp(raw[0], -imax, imax), current_l_measured - di,
+      current_l_measured + di);
+    double cmd_r = clamp(
+      clamp(raw[1], -imax, imax), current_r_measured - di,
+      current_r_measured + di);
+    cmd_l = clamp(cmd_l, -imax, imax);
+    cmd_r = clamp(cmd_r, -imax, imax);
+
+    // No startup current floor: the command is always generated by
+    // the LADRC formula (subject only to current and slew limits).
+    left_ladrc_.tracking = true;
+    right_ladrc_.tracking = true;
+    const auto estimated_wheels =
+      mimo_model_.body_to_wheel(mimo_ladrc_.z1);
+    const auto disturbance_wheels =
+      mimo_model_.body_to_wheel(mimo_ladrc_.z2);
+    left_ladrc_.z1 = estimated_wheels[0];
+    right_ladrc_.z1 = estimated_wheels[1];
+    left_ladrc_.z2 = disturbance_wheels[0];
+    right_ladrc_.z2 = disturbance_wheels[1];
+
+    return send_experimental(cmd_l, cmd_r);
+  }
+
   // ----------------------------------------------------------
   // Coordinated BREAKAWAY for near-pure in-place turns.
   //
@@ -854,7 +1256,7 @@ hardware_interface::return_type Zlac8015dSystemHardware::write(
   constexpr int SYNC_DELAY_SAMPLES = 100;
   constexpr int SYNC_RAMP_SAMPLES  = 100;
 
-  static int sync_track_count = 0;
+  // Synchronization counter is owned by the hardware instance.
 
   const bool straight_command =
     (control_ref_l * control_ref_r > 0.0) &&
@@ -862,7 +1264,7 @@ hardware_interface::return_type Zlac8015dSystemHardware::write(
      SYNC_REF_DIFF_TOL_RAD_S);
 
   const bool sync_eligible =
-    straight_command &&
+    !mimo_mode && straight_command &&
     !normal_stop_ramp_active_ &&
     !zero_stop_hold_ &&
     left_ladrc_.tracking &&
@@ -885,14 +1287,14 @@ hardware_interface::return_type Zlac8015dSystemHardware::write(
   {
     if (sync_error_in_range)
     {
-      ++sync_track_count;
+      ++sync_track_count_;
 
       double sync_gain = 0.0;
 
-      if (sync_track_count > SYNC_DELAY_SAMPLES)
+      if (sync_track_count_ > SYNC_DELAY_SAMPLES)
       {
         const int ramp_count =
-          sync_track_count - SYNC_DELAY_SAMPLES;
+          sync_track_count_ - SYNC_DELAY_SAMPLES;
 
         const double ramp_ratio =
           clamp(
@@ -912,34 +1314,110 @@ hardware_interface::return_type Zlac8015dSystemHardware::write(
         sync_gain * sync_error;
     }
     // If |sync_error| > 0.60 rad/s:
-    // suspend synchronization, but preserve sync_track_count.
+    // suspend synchronization, but preserve sync_track_count_.
   }
   else
   {
     // Reset only when straight-line synchronization itself
     // is no longer eligible.
-    sync_track_count = 0;
+    sync_track_count_ = 0;
   }
 
-  double cmd_current_l = compute_ladrc_current(
-    left_ladrc_,
+  // Apply the coupled controller only when both wheel state machines have
+  // completed BREAKAWAY. Retain the original start/stall/stop handling.
+  const bool mimo_ready =
+    mimo_mode && left_ladrc_.tracking && right_ladrc_.tracking &&
+    std::abs(ladrc_ref_l) > 1.0e-6 && std::abs(ladrc_ref_r) > 1.0e-6 &&
+    !left_ladrc_.stall_lockout && !right_ladrc_.stall_lockout;
+  mimo::Vec2 mimo_raw{{0.0, 0.0}};
+  if (!mimo_ready) {
+    mimo_ladrc_.reset();
+    mimo_pid_.reset();
+    mimo_was_ready_ = false;
+  } else {
+    const mimo::Vec2 measured_body =
+      mimo_model_.wheel_to_body({{hw_velocities_[0], hw_velocities_[1]}});
+    const mimo::Vec2 reference_body =
+      mimo_model_.wheel_to_body({{ladrc_ref_l, ladrc_ref_r}});
+    const mimo::Vec2 previous_current =
+      {{current_l_measured, current_r_measured}};
+    if (!mimo_was_ready_) {
+      mimo_ladrc_.reset_to_measurement(measured_body);
+      mimo_pid_.reset();
+      mimo_was_ready_ = true;
+    }
+
+    // Existing normal-stop acceleration feedforward, converted from wheel
+    // angular-acceleration coordinates to the body frame via T.
+    constexpr double STOP_DECEL_RAD_S2 = 15.625;
+    const mimo::Vec2 wheel_acceleration_ff = {{
+      normal_stop_ramp_active_ ?
+        -std::copysign(STOP_DECEL_RAD_S2, ladrc_ref_l) : 0.0,
+      normal_stop_ramp_active_ ?
+        -std::copysign(STOP_DECEL_RAD_S2, ladrc_ref_r) : 0.0}};
+    const mimo::Vec2 body_acceleration_ff =
+      mimo_model_.wheel_to_body(wheel_acceleration_ff);
+
+    if (control_mode_ == ControlMode::MIMO_LADRC_TORQUE) {
+      mimo_raw = mimo_ladrc_.step(
+        mimo_model_, reference_body, measured_body, previous_current,
+        dt, mimo_wc_, mimo_wo_, body_acceleration_ff);
+      // Maintain wheel-coordinate ESO diagnostics in the existing CSV.
+      const auto estimated_wheels =
+        mimo_model_.body_to_wheel(mimo_ladrc_.z1);
+      const auto estimated_wheel_disturbance =
+        mimo_model_.body_to_wheel(mimo_ladrc_.z2);
+      left_ladrc_.z1 = estimated_wheels[0];
+      right_ladrc_.z1 = estimated_wheels[1];
+      left_ladrc_.z2 = estimated_wheel_disturbance[0];
+      right_ladrc_.z2 = estimated_wheel_disturbance[1];
+    } else {
+      mimo_raw = mimo_pid_.step(
+        mimo_model_, reference_body, measured_body, dt,
+        mimo_pid_kp_, mimo_pid_ki_, mimo_pid_kd_,
+        pid_derivative_filter_tau_s_, current_limit_a_,
+        body_acceleration_ff, !normal_stop_ramp_active_,
+        last_velocity_feedback_time_);
+      // No LESO in PID mode; logged body values are measurements only.
+      mimo_ladrc_.z1 = measured_body;
+      mimo_ladrc_.z2 = {{0.0, 0.0}};
+      left_ladrc_.z1 = hw_velocities_[0];
+      right_ladrc_.z1 = hw_velocities_[1];
+      left_ladrc_.z2 = 0.0;
+      right_ladrc_.z2 = 0.0;
+    }
+  }
+
+  // Reject non-finite coupled requests before clamping and packing into
+  // signed CANopen milliamps (NaN -> integer conversion would be unsafe).
+  if (mimo_ready &&
+      (!std::isfinite(mimo_raw[0]) || !std::isfinite(mimo_raw[1])))
+  {
+    RCLCPP_ERROR(rclcpp::get_logger("Zlac8015dSystemHardware"),
+      "Non-finite MIMO current request; attempting zero current.");
+    send_zero_command();
+    return hardware_interface::return_type::ERROR;
+  }
+
+  double cmd_current_l = compute_current_command(
+    left_ladrc_, left_pid_,
     ladrc_ref_l,
     hw_velocities_[0],
     current_l_measured,
     dt,
-    allow_independent_track);
+    allow_independent_track, mimo_mode, mimo_ready, mimo_raw[0]);
 
-  double cmd_current_r = compute_ladrc_current(
-    right_ladrc_,
+  double cmd_current_r = compute_current_command(
+    right_ladrc_, right_pid_,
     ladrc_ref_r,
     hw_velocities_[1],
     current_r_measured,
     dt,
-    allow_independent_track);
+    allow_independent_track, mimo_mode, mimo_ready, mimo_raw[1]);
 
   // 0.30 rad/s for 100 ms = 20 samples @ 200 Hz.
   constexpr int COORDINATED_START_SAMPLES = 5;
-  constexpr double COORDINATED_BREAKAWAY_START_A = 0.65;
+  const double COORDINATED_BREAKAWAY_START_A = breakaway_start_a_;
 
   // ----------------------------------------------------------
   // BREAKAWAY -> TRACK:
@@ -953,6 +1431,19 @@ hardware_interface::return_type Zlac8015dSystemHardware::write(
   {
     left_ladrc_.tracking = true;
     right_ladrc_.tracking = true;
+
+    if (mimo_mode &&
+        (ladrc_ref_l * hw_velocities_[0] < 0.0 ||
+         ladrc_ref_r * hw_velocities_[1] < 0.0))
+    {
+      RCLCPP_WARN(
+        rclcpp::get_logger("Zlac8015dSystemHardware"),
+        "MIMO BREAKAWAY->TRACK during counter-rotation: "
+        "ref[L,R]=[%.3f,%.3f] vel[L,R]=[%.3f,%.3f] rad/s. "
+        "Closed-loop braking enabled.",
+        ladrc_ref_l, ladrc_ref_r,
+        hw_velocities_[0], hw_velocities_[1]);
+    }
 
     left_ladrc_.stall_count = 0;
     right_ladrc_.stall_count = 0;
@@ -1004,7 +1495,7 @@ hardware_interface::return_type Zlac8015dSystemHardware::write(
       (left_ladrc_.tracking != right_ladrc_.tracking))
   {
     auto reset_to_breakaway =
-      [](LadrcState & state,
+      [COORDINATED_BREAKAWAY_START_A](LadrcState & state,
          const double velocity_measured,
          const int direction)
       {
@@ -1040,6 +1531,8 @@ hardware_interface::return_type Zlac8015dSystemHardware::write(
 
     reset_to_breakaway(
       right_ladrc_, hw_velocities_[1], direction_r);
+    left_pid_ = PidState{};
+    right_pid_ = PidState{};
 
     cmd_current_l =
       static_cast<double>(direction_l) *
@@ -1049,6 +1542,19 @@ hardware_interface::return_type Zlac8015dSystemHardware::write(
       static_cast<double>(direction_r) *
       COORDINATED_BREAKAWAY_START_A;
   }
+
+  // A repeated stall on either wheel latches both current commands to zero.
+  // This software lockout is not a physical emergency stop.
+  if (left_ladrc_.stall_lockout || right_ladrc_.stall_lockout) {
+    cmd_current_l = 0.0;
+    cmd_current_r = 0.0;
+  }
+
+  // Final absolute current cap applies to every start/track/turn state.
+  cmd_current_l = clamp(cmd_current_l, -current_limit_a_, current_limit_a_);
+  cmd_current_r = clamp(cmd_current_r, -current_limit_a_, current_limit_a_);
+  left_ladrc_.last_current_cmd = cmd_current_l;
+  right_ladrc_.last_current_cmd = cmd_current_r;
 
   // ZLAC command convention on this robot: left sign is opposite to ROS-forward.
   const int16_t cmd_l_ma = static_cast<int16_t>(
@@ -1076,47 +1582,53 @@ hardware_interface::return_type Zlac8015dSystemHardware::write(
   if (++debug_count % 200 == 0) {
     RCLCPP_INFO(
       rclcpp::get_logger("Zlac8015dSystemHardware"),
-      "LADRC ref[L,R]=[%.2f, %.2f] rad/s vel=[%.2f, %.2f] A_cmd=[%.2f, %.2f] A_actual=[%.2f, %.2f] z2=[%.2f, %.2f]",
+      "%s ref[L,R]=[%.2f, %.2f] rad/s vel=[%.2f, %.2f] A_cmd=[%.2f, %.2f] A_actual=[%.2f, %.2f] z2=[%.2f, %.2f]",
+      (control_mode_ == ControlMode::PID_TORQUE ||
+        control_mode_ == ControlMode::MIMO_PID_TORQUE) ? "PID" : "LADRC",
       hw_commands_[0], hw_commands_[1],
       hw_velocities_[0], hw_velocities_[1],
       cmd_current_l, cmd_current_r,
-      current_l_measured, current_r_measured,
+      hw_efforts_[0], hw_efforts_[1],
       left_ladrc_.z2, right_ladrc_.z2);
   }
 
   return hardware_interface::return_type::OK;
 }
 
-double Zlac8015dSystemHardware::compute_ladrc_current(
+double Zlac8015dSystemHardware::compute_current_command(
   LadrcState & state,
+  PidState & pid_state,
   const double velocity_reference,
   const double velocity_measured,
   const double current_measured,
   const double dt,
-  const bool allow_track_transition)
+  const bool allow_track_transition,
+  const bool mimo_torque_mode,
+  const bool use_mimo_raw,
+  const double mimo_raw_current)
 {
 
   constexpr double REF_ZERO = 1.0e-6;
 
-  constexpr double BREAKAWAY_START_A = 0.65;
-  constexpr double BREAKAWAY_STEP_A = 0.50;
-  constexpr double BREAKAWAY_MAX_A   = 8.00;
+  const double BREAKAWAY_START_A = breakaway_start_a_;
+  const double BREAKAWAY_STEP_A = breakaway_step_a_;
+  const double BREAKAWAY_MAX_A = std::min(breakaway_max_a_, current_limit_a_);
 
-  // During coordinated in-place BREAKAWAY, a wheel that has
-  // already satisfied the start condition waits at this current
-  // while the other wheel continues its BREAKAWAY ramp.
-  constexpr double READY_WAIT_A = 3.00;
+  // Legacy coordinated startup raises a ready wheel's current to
+  // BREAKAWAY_MAX_A while awaiting the other wheel. In MIMO modes
+  // keep the current target instead to avoid prolonged ±2 A torque.
+  const double READY_WAIT_A = BREAKAWAY_MAX_A;
 
-  constexpr int BREAKAWAY_STEP_SAMPLES = 10;  // 200 ms @ 200 Hz
+  const int BREAKAWAY_STEP_SAMPLES = breakaway_step_samples_;
 
-  constexpr double START_SPEED_RAD_S = 0.30;
-  constexpr int START_SAMPLES = 20;
-constexpr int COORDINATED_READY_SAMPLES = 5;            // 100 ms @ 200 Hz
+  const double START_SPEED_RAD_S = breakaway_start_speed_rad_s_;
+  const int START_SAMPLES = breakaway_start_samples_;
+  const int COORDINATED_READY_SAMPLES = breakaway_start_samples_;
 
-  constexpr double STALL_SPEED_RAD_S = 0.10;
-  constexpr int STALL_SAMPLES = 20;            // 100 ms @ 200 Hz
+  const double STALL_SPEED_RAD_S = stall_speed_rad_s_;
+  const int STALL_SAMPLES = stall_samples_;
 
-  constexpr int TRACK_HOLD_SAMPLES = 30;       // 300 ms @ 200 Hz
+  constexpr int TRACK_HOLD_SAMPLES = 30;       // 150 ms @ 200 Hz
   constexpr double TRACK_FLOOR_A = 0.20;
 
 
@@ -1124,8 +1636,7 @@ constexpr int COORDINATED_READY_SAMPLES = 5;            // 100 ms @ 200 Hz
   // Zero velocity reference:
   // reset LADRC state and command zero current.
   //
-  // Actual stopping is handled by the driver-side Quick Stop
-  // in write().
+  // Normal stopping uses the controlled deceleration ramp in write().
   // ----------------------------------------------------------
 
   if (std::abs(velocity_reference) <= REF_ZERO) {
@@ -1137,6 +1648,8 @@ constexpr int COORDINATED_READY_SAMPLES = 5;            // 100 ms @ 200 Hz
     state.tracking = false;
     state.start_count = 0;
     state.stall_count = 0;
+    state.stall_recovery_attempts = 0;
+    state.stall_lockout = false;
 
     state.breakaway_count = 0;
     state.breakaway_target = BREAKAWAY_START_A;
@@ -1145,10 +1658,16 @@ constexpr int COORDINATED_READY_SAMPLES = 5;            // 100 ms @ 200 Hz
     state.track_hold_start = TRACK_FLOOR_A;
 
     state.direction_sign = 0;
+    pid_state = PidState{};
 
     return 0.0;
   }
 
+  // Only a zero-speed reference clears a repeated-stall lockout.
+  if (state.stall_lockout) {
+    state.last_current_cmd = 0.0;
+    return 0.0;
+  }
 
   const int direction =
     velocity_reference >= 0.0 ? +1 : -1;
@@ -1179,6 +1698,7 @@ constexpr int COORDINATED_READY_SAMPLES = 5;            // 100 ms @ 200 Hz
 
     state.track_hold_count = 0;
     state.track_hold_start = TRACK_FLOOR_A;
+    pid_state = PidState{};
   }
 
   state.direction_sign = direction;
@@ -1189,14 +1709,21 @@ constexpr int COORDINATED_READY_SAMPLES = 5;            // 100 ms @ 200 Hz
   // ==========================================================
 
   if (!state.tracking) {
+    // No PID integrator accumulation while breaking static friction.
+    pid_state = PidState{};
 
     // Freeze/reset ESO during BREAKAWAY.
     state.z1 = velocity_measured;
     state.z2 = 0.0;
     state.initialized = true;
 
-    // Require sustained rotation before entering TRACK.
-    if (speed_in_command_direction >= START_SPEED_RAD_S) {
+    // Once moving, closed-loop feedback should control deceleration even
+    // if the wheel is rotating opposite to its reference. Only MIMO modes
+    // use direction-independent TRACK readiness; legacy modes are unchanged.
+    const bool moving_enough = mimo::moving_for_track(
+      velocity_reference, velocity_measured, START_SPEED_RAD_S,
+      mimo_torque_mode);
+    if (moving_enough) {
       ++state.start_count;
     } else {
       state.start_count = 0;
@@ -1212,27 +1739,27 @@ constexpr int COORDINATED_READY_SAMPLES = 5;            // 100 ms @ 200 Hz
       (!allow_track_transition &&
        state.start_count >= COORDINATED_READY_SAMPLES);
 
-    // During coordinated READY, use READY_WAIT_A as a minimum current.
-    // If a larger current was required to reach READY, keep that value.
+    // Legacy coordinated startup uses READY_WAIT_A as a minimum;
+    // MIMO startup preserves the current level of the already-moving wheel.
     if (coordinated_ready) {
-      state.breakaway_target =
-        std::max(state.breakaway_target, READY_WAIT_A);
+      state.breakaway_target = mimo::coordinated_ready_target(
+        state.breakaway_target, READY_WAIT_A, mimo_torque_mode);
     }
 
-    // Once a wheel becomes READY, stop increasing its BREAKAWAY
-    // current and keep at least READY_WAIT_A.
-    // If the wheel required more than READY_WAIT_A to become READY,
-    // keep that larger value.
+    // Once READY, hold the existing BREAKAWAY current; in MIMO modes
+    // do not raise it to the maximum merely because the other wheel
+    // has not completed its transition.
 
-    // Increase target by BREAKAWAY_STEP_A every 200 ms only while
+    // Increase target every BREAKAWAY_STEP_SAMPLES cycles only while
     // this wheel is not yet ready.
     if (!coordinated_ready &&
+        !moving_enough &&
         state.breakaway_count > 0 &&
         state.breakaway_count % BREAKAWAY_STEP_SAMPLES == 0)
     {
       state.breakaway_target = clamp(
         state.breakaway_target + BREAKAWAY_STEP_A,
-        BREAKAWAY_START_A,
+        std::min(BREAKAWAY_START_A, BREAKAWAY_MAX_A),
         BREAKAWAY_MAX_A);
     }
 
@@ -1243,7 +1770,8 @@ constexpr int COORDINATED_READY_SAMPLES = 5;            // 100 ms @ 200 Hz
       static_cast<double>(direction) *
       state.breakaway_target;
 
-    state.last_current_cmd = breakaway_current;
+    state.last_current_cmd = clamp(
+      breakaway_current, -current_limit_a_, current_limit_a_);
 
 
     if (allow_track_transition &&
@@ -1253,8 +1781,9 @@ constexpr int COORDINATED_READY_SAMPLES = 5;            // 100 ms @ 200 Hz
       state.stall_count = 0;
 
       state.track_hold_count = 0;
-      state.track_hold_start =
-        state.breakaway_target;
+      // The existing slew limiter keeps current continuous on handoff.
+      // Do not keep the high BREAKAWAY floor in TRACK.
+      state.track_hold_start = TRACK_FLOOR_A;
 
       // Start TRACK observer from the measured state.
       state.z1 = velocity_measured;
@@ -1262,10 +1791,20 @@ constexpr int COORDINATED_READY_SAMPLES = 5;            // 100 ms @ 200 Hz
       state.initialized = true;
     }
 
-    return breakaway_current;
+    return clamp(breakaway_current, -current_limit_a_, current_limit_a_);
   }
 
 
+  // ==========================================================
+  // TRACK: select LADRC or PID. Share output limits, hold and stall.
+  // ==========================================================
+  double raw_current_request = 0.0;
+  if (use_mimo_raw) {
+    // Current clamping, slew-rate, direction-aware floor and stall recovery
+    // below remain shared with the legacy controller.
+    raw_current_request = mimo_raw_current;
+  } else if (control_mode_ == ControlMode::LADRC_TORQUE ||
+             control_mode_ == ControlMode::MIMO_LADRC_TORQUE) {
   // ==========================================================
   // TRACK: LESO
   // ==========================================================
@@ -1334,12 +1873,57 @@ constexpr int COORDINATED_READY_SAMPLES = 5;            // 100 ms @ 200 Hz
   // Its sign is important: if LADRC requests current opposite
   // to the commanded motion, the controller is asking for
   // braking torque.  TRACK current floor must not prevent that.
-  const double raw_ladrc_current_command =
-    (desired_acceleration - state.z2) /
-    state.b0;
+  raw_current_request = (desired_acceleration - state.z2) / state.b0;
+  } else {
+    // PID current output [A] from wheel-speed error [rad/s].
+    // Differentiation on measured speed prevents reference-step kick.
+    state.z1 = velocity_measured; // diagnostic, not an LESO estimate
+    state.z2 = 0.0;
+    state.initialized = true;
 
-  double current_command =
-    raw_ladrc_current_command;
+    if (!pid_state.initialized) {
+      pid_state.previous_velocity = velocity_measured;
+      pid_state.filtered_velocity_derivative = 0.0;
+      pid_state.integral_current = 0.0;
+      pid_state.initialized = true;
+    }
+    const double measured_derivative =
+      (velocity_measured - pid_state.previous_velocity) / dt;
+    pid_state.previous_velocity = velocity_measured;
+    const double alpha = dt / (pid_derivative_filter_tau_s_ + dt);
+    pid_state.filtered_velocity_derivative += alpha *
+      (measured_derivative - pid_state.filtered_velocity_derivative);
+
+    const double error = velocity_reference - velocity_measured;
+    const double p_current = pid_kp_ * error;
+    const double d_current =
+      -pid_kd_ * pid_state.filtered_velocity_derivative;
+    const double tentative =
+      p_current + pid_state.integral_current + d_current;
+    // Conditional-integration anti-windup for current amplitude limits.
+    const bool pushing_positive =
+      tentative >= current_limit_a_ && error > 0.0;
+    const bool pushing_negative =
+      tentative <= -current_limit_a_ && error < 0.0;
+    if (!pushing_positive && !pushing_negative &&
+        !normal_stop_ramp_active_) {
+      pid_state.integral_current = clamp(
+        pid_state.integral_current + pid_ki_ * error * dt,
+        -current_limit_a_, current_limit_a_);
+    }
+    raw_current_request =
+      p_current + pid_state.integral_current + d_current;
+
+    // Normal stop: same deceleration acceleration feedforward as LADRC,
+    // converted into commanded current using the configured b0.
+    if (normal_stop_ramp_active_ && std::abs(velocity_reference) > 1.0e-6) {
+      constexpr double STOP_DECEL_RAD_S2 = 15.625;
+      raw_current_request -=
+        std::copysign(STOP_DECEL_RAD_S2 / state.b0, velocity_reference);
+    }
+  }
+
+  double current_command = raw_current_request;
 
 
   // TRACK Imax
@@ -1363,19 +1947,10 @@ constexpr int COORDINATED_READY_SAMPLES = 5;            // 100 ms @ 200 Hz
   // TRACK_HOLD / current floor
   // ==========================================================
 
-  double floor_a = TRACK_FLOOR_A;
-
+  // Count the TRACK settling interval for synchronization, but do not
+  // impose a prolonged BREAKAWAY-current floor after control handoff.
+  const double floor_a = TRACK_FLOOR_A;
   if (state.track_hold_count < TRACK_HOLD_SAMPLES) {
-
-    const double ratio =
-      static_cast<double>(state.track_hold_count) /
-      static_cast<double>(TRACK_HOLD_SAMPLES);
-
-    floor_a =
-      state.track_hold_start +
-      (TRACK_FLOOR_A - state.track_hold_start) *
-      ratio;
-
     ++state.track_hold_count;
   }
 
@@ -1396,16 +1971,16 @@ constexpr int COORDINATED_READY_SAMPLES = 5;            // 100 ms @ 200 Hz
   // positive/forward current floor.
   const double raw_current_in_command_direction =
     static_cast<double>(direction) *
-    raw_ladrc_current_command;
+    raw_current_request;
 
   const double current_in_command_direction =
     static_cast<double>(direction) *
     current_command;
 
-  // Apply the TRACK current floor only when the ORIGINAL LADRC
+  // Apply the TRACK current floor only when the ORIGINAL controller
   // request is drive torque in the commanded direction.
   //
-  // If raw LADRC requests braking torque, do not apply the floor.
+  // If the controller requests braking torque, do not apply the floor.
   // The slew-rate limiter can then move the command gradually
   // through zero into braking current.
   if (!normal_stop_ramp_active_ &&
@@ -1433,7 +2008,25 @@ constexpr int COORDINATED_READY_SAMPLES = 5;            // 100 ms @ 200 Hz
   // Stall detection
   // ==========================================================
 
-  if (speed_in_command_direction < STALL_SPEED_RAD_S) {
+  // Restart only after sustained low speed while the controller asks
+  // for positive drive torque. A braking command after overshoot must NOT
+  // be interpreted as a static-friction stall.
+  const double driving_request =
+    static_cast<double>(direction) * raw_current_request;
+  // A controller request weaker than the start current is not grounds
+  // for another BREAKAWAY cycle. E.g. at 0.10 m/s, Kp=0.2 requests
+  // only 0.3125 A at rest while start current is 0.65 A.
+  const double retry_current_threshold =
+    std::max(stall_min_drive_current_a_, breakaway_start_a_);
+  const bool genuinely_stalled =
+    !normal_stop_ramp_active_ &&
+    state.track_hold_count >= TRACK_HOLD_SAMPLES &&
+    speed_in_command_direction >= -STALL_SPEED_RAD_S &&
+    speed_in_command_direction < STALL_SPEED_RAD_S &&
+    driving_request >= retry_current_threshold &&
+    static_cast<double>(direction) * current_command >=
+      retry_current_threshold;
+  if (genuinely_stalled) {
     ++state.stall_count;
   } else {
     state.stall_count = 0;
@@ -1441,6 +2034,18 @@ constexpr int COORDINATED_READY_SAMPLES = 5;            // 100 ms @ 200 Hz
 
 
   if (state.stall_count >= STALL_SAMPLES) {
+    state.stall_count = 0;
+    if (state.stall_recovery_attempts >= 1) {
+      state.stall_lockout = true;
+      state.last_current_cmd = 0.0;
+      RCLCPP_ERROR(
+        rclcpp::get_logger("Zlac8015dSystemHardware"),
+        "Repeated stall: both wheel current commands locked to zero until "
+        "a zero-speed reference is received.");
+      return 0.0;
+    }
+    ++state.stall_recovery_attempts;
+    pid_state = PidState{};
 
     state.tracking = false;
 
@@ -1654,9 +2259,9 @@ void Zlac8015dSystemHardware::send_zero_command()
   struct can_frame frame {};
 
   frame.can_id =
-    control_mode_ == ControlMode::LADRC_TORQUE
-      ? 0x200u + node_id_
-      : 0x300u + node_id_;
+    control_mode_ == ControlMode::VELOCITY
+      ? 0x300u + node_id_
+      : 0x200u + node_id_;
 
   frame.can_dlc = 4;
   std::memcpy(frame.data, &zero, sizeof(zero));

@@ -2,6 +2,7 @@
 #define ZLAC8015D_SYSTEM_HPP_
 
 #include <chrono>
+#include "zlac8015d_hardware/mimo_control.hpp"
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -53,6 +54,9 @@ private:
 
     int start_count{0};
     int stall_count{0};
+    // Limit repeated automatic starts within one nonzero-speed command.
+    int stall_recovery_attempts{0};
+    bool stall_lockout{false};
 
     int breakaway_count{0};
     double breakaway_target{0.65};
@@ -64,10 +68,22 @@ private:
     int direction_sign{0};
   };
 
+  // Integral and derivative states used only in PID current mode.
+  struct PidState
+  {
+    double integral_current{0.0}; // integral output [A]
+    double filtered_velocity_derivative{0.0}; // [rad/s^2]
+    double previous_velocity{0.0}; // [rad/s]
+    bool initialized{false};
+  };
+
   enum class ControlMode
   {
     VELOCITY,
-    LADRC_TORQUE
+    LADRC_TORQUE,
+    PID_TORQUE,
+    MIMO_LADRC_TORQUE,
+    MIMO_PID_TORQUE
   };
 
   // CAN socket / CANopen configuration
@@ -82,13 +98,17 @@ private:
   void send_zero_command();
 
   // LADRC helper
-  double compute_ladrc_current(
+  double compute_current_command(
     LadrcState & state,
+    PidState & pid_state,
     double velocity_reference,
     double velocity_measured,
     double current_measured,
     double dt,
-    bool allow_track_transition);
+    bool allow_track_transition,
+    bool mimo_torque_mode,
+    bool use_mimo_raw,
+    double mimo_raw_current);
   static double clamp(double value, double lower, double upper);
 
   // ros2_control command / state
@@ -99,8 +119,44 @@ private:
 
   // Controller configuration
   ControlMode control_mode_{ControlMode::VELOCITY};
+  // Experimental, opt-in only: apply MIMO-LADRC from zero wheel speed.
+  // The stable mimo_ladrc_torque state machine is completely unchanged.
+  bool experimental_no_breakaway_{false};
+  double no_breakaway_current_limit_a_{8.0};
+  // Latches until hardware controller reactivation (not cleared by cmd_vel=0).
+  bool no_breakaway_overspeed_latched_{false};
   LadrcState left_ladrc_;
   LadrcState right_ladrc_;
+  PidState left_pid_;
+  PidState right_pid_;
+  // Two-input/two-output controllers operating in body coordinates [v, yaw_rate].
+  mimo::DifferentialDriveModel mimo_model_{0.064, 0.354, 18.0, 18.0};
+  mimo::Ladrc mimo_ladrc_;
+  mimo::Pid mimo_pid_;
+  bool mimo_was_ready_{false};
+  double mimo_wheel_radius_m_{0.064};
+  double mimo_wheel_separation_m_{0.354};
+  mimo::Vec2 mimo_wc_{{5.0, 5.0}};
+  mimo::Vec2 mimo_wo_{{20.0, 20.0}};
+  mimo::Vec2 mimo_pid_kp_{{0.7, 0.7}};
+  mimo::Vec2 mimo_pid_ki_{{0.5, 0.5}};
+  mimo::Vec2 mimo_pid_kd_{{0.03, 0.03}};
+  double pid_kp_{0.7};  // [A/(rad/s)]
+  double pid_ki_{0.5};  // [A/rad]
+  double pid_kd_{0.03}; // [A*s/rad]
+  double pid_derivative_filter_tau_s_{0.05}; // [s]
+  // Tunable start/recovery thresholds. Interpret step_samples against the
+  // ros2_control update rate (nominally 200 Hz); no changes while running.
+  double breakaway_start_a_{0.65};
+  double breakaway_step_a_{0.10};
+  double breakaway_max_a_{2.00};
+  int breakaway_step_samples_{20};
+  double breakaway_start_speed_rad_s_{0.30};
+  int breakaway_start_samples_{6};
+  double stall_speed_rad_s_{0.10};
+  int stall_samples_{80};
+  double stall_min_drive_current_a_{0.20};
+  int sync_track_count_{0};
   double controller_bandwidth_{5.0};       // wc [rad/s]
   double observer_bandwidth_{20.0};        // wo [rad/s]
   double current_limit_a_{2.0};            // absolute LADRC output limit [A]
