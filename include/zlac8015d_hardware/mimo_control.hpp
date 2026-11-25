@@ -132,9 +132,12 @@ struct DifferentialDriveModel
 };
 
 // First-order MIMO-LADRC with the total disturbance as a second vector state.
-// Euler LESO: z1_dot = z2 + B*u_previous + 2*Wo*(y-z1)
+// Euler LESO: z1_dot = z2 + B*u_eso + 2*Wo*(y-z1)
 //             z2_dot = Wo^2*(y-z1).
-// The same ROS-positive current that was actually sent must be fed to the ESO.
+// The caller selects the ROS-positive current input: either the prior
+// commanded current (baseline) or latest measured TPDO1 current (experiment).
+// The controller gains, observer structure, and Euler discretization are
+// identical for both choices.
 class Ladrc
 {
 public:
@@ -152,11 +155,11 @@ public:
 
   Vec2 step(
     const DifferentialDriveModel & model, const Vec2 & reference,
-    const Vec2 & measured, const Vec2 & previous_current, const double dt,
+    const Vec2 & measured, const Vec2 & eso_input_current, const double dt,
     const Vec2 & wc, const Vec2 & wo, const Vec2 & acceleration_feedforward = {{0.0, 0.0}})
   {
     if (!initialized) {reset_to_measurement(measured);}
-    const Vec2 known_acceleration = multiply(model.B, previous_current);
+    const Vec2 known_acceleration = multiply(model.B, eso_input_current);
     for (std::size_t i = 0; i < 2; ++i) {
       const double error = measured[i] - z1[i];
       const double z1_dot = z2[i] + known_acceleration[i] + 2.0 * wo[i] * error;
