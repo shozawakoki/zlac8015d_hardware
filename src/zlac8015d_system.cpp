@@ -117,6 +117,9 @@ hardware_interface::CallbackReturn Zlac8015dSystemHardware::on_init(
     }
     node_id_ = static_cast<uint8_t>(node_id);
 
+    // Reset opt-in flags on initialization; the selected mode sets them.
+    experimental_no_breakaway_ = false;
+    experimental_actual_current_ = false;
     std::string mode =
       get_string_parameter(info_, "control_mode", "velocity");
     // Allows selection at ros2 launch without modifying the bringup URDF.
