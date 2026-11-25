@@ -122,6 +122,41 @@ int main()
   assert(std::abs(actual_u[0] - commanded_u[0]) > 1.0e-6);
   assert(std::abs(actual_u[1] - commanded_u[1]) > 1.0e-6);
 
+  // A zero-velocity reference must still be processed by MIMO-LADRC.
+  // No normal-stop feedforward or open-loop zero-current hold is used
+  // in the measured-current experiment. From positive motion the command
+  // must initially be a braking current, subject to the existing limits.
+  const Vec2 zero_body_reference = model.wheel_to_body(stationary);
+  const Vec2 rolling_body = model.wheel_to_body({{6.0, 6.0}});
+  Ladrc closed_loop_stop;
+  closed_loop_stop.reset_to_measurement(rolling_body);
+  const auto braking = closed_loop_stop.step(
+    model, zero_body_reference, rolling_body, stationary,
+    dt, {{wc, wc}}, {{wo, wo}});
+  assert(braking[0] < 0.0 && braking[1] < 0.0);
+  assert(closed_loop_stop.initialized);
+  assert(std::abs(limit_current(braking[0], 0.0, 8.0, 20.0, dt)) <= 0.1 + 1e-12);
+
+  // Continue the same ESO instance across the zero-reference transition.
+  const auto updated_measured_body = model.wheel_to_body({{3.0, 3.0}});
+  const auto z1_before = closed_loop_stop.z1;
+  const auto braking_next = closed_loop_stop.step(
+    model, zero_body_reference, updated_measured_body, stationary,
+    dt, {{wc, wc}}, {{wo, wo}});
+  assert(std::isfinite(braking_next[0]) && std::isfinite(braking_next[1]));
+  assert(closed_loop_stop.initialized);
+  assert(std::abs(closed_loop_stop.z1[0] - z1_before[0]) > 1e-9);
+
+  // For a pure turn, zero target should brake the two wheels in
+  // opposite directions (not inject a preprogrammed stop ramp).
+  const Vec2 turning_body = model.wheel_to_body({{-4.0, 4.0}});
+  Ladrc closed_loop_turn_stop;
+  closed_loop_turn_stop.reset_to_measurement(turning_body);
+  const auto turn_braking = closed_loop_turn_stop.step(
+    model, zero_body_reference, turning_body, stationary,
+    dt, {{wc, wc}}, {{wo, wo}});
+  assert(turn_braking[0] > 0.0 && turn_braking[1] < 0.0);
+
   // No requirement for actual wheel movement before the LADRC step.
   // Saturation and slew-rate protection still apply.
   std::cout << "No-BREAKAWAY LADRC pure-model tests passed\n";
