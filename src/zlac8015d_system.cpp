@@ -120,6 +120,7 @@ hardware_interface::CallbackReturn Zlac8015dSystemHardware::on_init(
     // Reset opt-in flags on initialization; the selected mode sets them.
     experimental_no_breakaway_ = false;
     experimental_actual_current_ = false;
+    experimental_pid_no_breakaway_ = false;
     std::string mode =
       get_string_parameter(info_, "control_mode", "velocity");
     // Allows selection at ros2 launch without modifying the bringup URDF.
@@ -146,11 +147,18 @@ hardware_interface::CallbackReturn Zlac8015dSystemHardware::on_init(
       experimental_actual_current_ = true;
     } else if (mode == "mimo_pid_torque") {
       control_mode_ = ControlMode::MIMO_PID_TORQUE;
+    } else if (mode == "mimo_pid_no_breakaway") {
+      // Comparison with actual-current MIMO-LADRC: pure MIMO-PID from
+      // standstill through zero-reference stopping, with no BREAKAWAY.
+      control_mode_ = ControlMode::MIMO_PID_TORQUE;
+      experimental_no_breakaway_ = true;
+      experimental_pid_no_breakaway_ = true;
     } else {
       throw std::runtime_error(
         "control_mode must be 'velocity', 'ladrc_torque', 'pid_torque', "
         "'mimo_ladrc_torque', 'mimo_ladrc_no_breakaway', "
-        "'mimo_ladrc_no_breakaway_actual_current', or 'mimo_pid_torque'");
+        "'mimo_ladrc_no_breakaway_actual_current', 'mimo_pid_torque', "
+        "or 'mimo_pid_no_breakaway'");
     }
     pid_kp_ = get_double_parameter(info_, "pid_kp", 0.7);
     pid_ki_ = get_double_parameter(info_, "pid_ki", 0.5);
@@ -323,6 +331,7 @@ hardware_interface::CallbackReturn Zlac8015dSystemHardware::on_init(
     rclcpp::get_logger("Zlac8015dSystemHardware"),
     "Configured mode=%s, CAN=%s, node=%u, wc=%.3f, wo=%.3f, Imax=%.3f A",
     experimental_actual_current_ ? "mimo_ladrc_no_breakaway_actual_current" :
+    experimental_pid_no_breakaway_ ? "mimo_pid_no_breakaway" :
     experimental_no_breakaway_ ? "mimo_ladrc_no_breakaway" :
     control_mode_ == ControlMode::VELOCITY ? "velocity" :
       (control_mode_ == ControlMode::PID_TORQUE ? "pid_torque" :
@@ -333,7 +342,7 @@ hardware_interface::CallbackReturn Zlac8015dSystemHardware::on_init(
     static_cast<unsigned>(node_id_),
     controller_bandwidth_, observer_bandwidth_, current_limit_a_);
 
-  if (experimental_no_breakaway_) {
+  if (experimental_no_breakaway_ && !experimental_pid_no_breakaway_) {
     RCLCPP_WARN(
       rclcpp::get_logger("Zlac8015dSystemHardware"),
       "MIMO_LADRC_NO_BREAKAWAY_EXP_20261115_R5 active. "
@@ -353,11 +362,24 @@ hardware_interface::CallbackReturn Zlac8015dSystemHardware::on_init(
     }
   }
 
+  if (experimental_pid_no_breakaway_) {
+    RCLCPP_WARN(
+      rclcpp::get_logger("Zlac8015dSystemHardware"),
+      "MIMO_PID_NO_BREAKAWAY_ZERO_REFERENCE_20261126_R1 active: "
+      "pure body-frame MIMO-PID from standstill through zero-speed stop; "
+      "no BREAKAWAY, stop ramp, stop feedforward, or ZERO HOLD. "
+      "Imax=%.2f A, dI/dt=%.2f A/s, wheel overspeed >=2.0m/s latches 0 A, "
+      "velocity/current feedback timeout=%.1f ms.",
+      no_breakaway_current_limit_a_, current_rate_limit_a_per_s_,
+      feedback_timeout_s_ * 1000.0);
+  }
+
   // Runtime provenance marker. A source checkout alone does not prove the
   // installed plugin was rebuilt or loaded. This literal is emitted ONLY
   // from the active compiled plugin, then archived by the launch recorder.
-  if (control_mode_ == ControlMode::MIMO_LADRC_TORQUE ||
-      control_mode_ == ControlMode::MIMO_PID_TORQUE)
+  if (!experimental_no_breakaway_ &&
+      (control_mode_ == ControlMode::MIMO_LADRC_TORQUE ||
+       control_mode_ == ControlMode::MIMO_PID_TORQUE))
   {
     RCLCPP_INFO(
       rclcpp::get_logger("Zlac8015dSystemHardware"),
@@ -805,6 +827,8 @@ hardware_interface::return_type Zlac8015dSystemHardware::write(
 
       if (!csv_initialized) {
         const char * log_path =
+          experimental_pid_no_breakaway_ ?
+            "/tmp/mimo_pid_no_breakaway_200hz.csv" :
           control_mode_ == ControlMode::MIMO_PID_TORQUE ?
             "/tmp/mimo_pid_track_200hz.csv" :
           experimental_actual_current_ ?
@@ -958,9 +982,11 @@ hardware_interface::return_type Zlac8015dSystemHardware::write(
     return hardware_interface::return_type::ERROR;
   }
 
-  // Never run the measured-current ESO on an unreceived or stale TPDO1
-  // sample. Reuse the existing timeout parameter (30 ms in the URDF).
-  if (experimental_actual_current_) {
+  // Both continuous-control experiments use the same freshness guard:
+  // TPDO1 measured current is the LADRC-ESO input, and is monitored for
+  // the PID comparison as well so the shutdown conditions remain equal.
+  // Reuse feedback_timeout_s_ (30 ms in the URDF).
+  if (experimental_actual_current_ || experimental_pid_no_breakaway_) {
     if (!current_feedback_received_) {
       send_zero_command();
       return hardware_interface::return_type::OK;
@@ -1029,10 +1055,11 @@ hardware_interface::return_type Zlac8015dSystemHardware::write(
       return 0.0;
     };
 
-  // In the measured-current experiment, even a zero velocity command is
-  // sent directly to MIMO-LADRC. Do not run the normal-stop trajectory
-  // generator or switch to ZERO HOLD in that mode. Other modes are unchanged.
-  if (zero_velocity_command && !experimental_actual_current_) {
+  // In either continuous-control experiment, the zero-velocity command
+  // passes unchanged to LADRC/PID (no stop ramp or ZERO HOLD).
+  // Other legacy modes retain their original stopping sequence.
+  if (zero_velocity_command &&
+      !(experimental_actual_current_ || experimental_pid_no_breakaway_)) {
 
     // ========================================================
     // ZERO HOLD
@@ -1141,9 +1168,9 @@ hardware_interface::return_type Zlac8015dSystemHardware::write(
   }
   else {
 
-    // For the measured-current experiment this path also handles zero
-    // reference: it passes hw_commands_ unchanged to MIMO-LADRC.
-    // For the other modes this path releases ZERO HOLD on a nonzero command.
+    // For both continuous experiments this path also handles zero reference:
+    // it passes hw_commands_ unchanged to MIMO-LADRC or MIMO-PID.
+    // For legacy modes this path releases ZERO HOLD on a nonzero command.
     normal_stop_ramp_active_ = false;
     zero_stop_hold_ = false;
 
@@ -1169,9 +1196,9 @@ hardware_interface::return_type Zlac8015dSystemHardware::write(
   // mimo_ladrc_torque and all PID modes take the existing path below.
   // No open-loop startup currents, READY wait, TRACK current floor,
   // or automatic stall->BREAKAWAY transition are used in this mode.
-  // The measured-current sub-mode keeps MIMO-LADRC active at zero reference
-  // without a stop ramp, stop feedforward, or zero-current hold.
-  // Legacy no-BREAKAWAY and all other modes keep their previous stop logic.
+  // The measured-current LADRC and continuous PID sub-modes stay active
+  // through zero reference without a stop ramp, feedforward, or ZERO HOLD.
+  // Legacy no-BREAKAWAY and all other modes keep their stop logic.
   // Feedback freshness, CAN error checks, current limits and slew remain.
   // ==========================================================
   if (experimental_no_breakaway_) {
@@ -1180,7 +1207,9 @@ hardware_interface::return_type Zlac8015dSystemHardware::write(
       (std::abs(control_ref_l) > 1.0e-6 ||
        std::abs(control_ref_r) > 1.0e-6);
 
-    if (!experimental_actual_current_ && !active_reference) {
+    if (!(experimental_actual_current_ || experimental_pid_no_breakaway_) &&
+        !active_reference)
+    {
       // Legacy normal stop / zero hold. Overspeed lockout handled above.
       left_ladrc_.tracking = false;
       right_ladrc_.tracking = false;
@@ -1229,17 +1258,20 @@ hardware_interface::return_type Zlac8015dSystemHardware::write(
     };
 
     if (!mimo_was_ready_) {
-      // Initialize ESO at the measured (possibly zero) velocity.
-      // Do not reset on direction changes or while the wheels stall.
-      mimo_ladrc_.reset_to_measurement(measured_body);
+      // Initialize once, then retain PID/ESO states through zero reference,
+      // direction changes, and wheel stalls (only the selected controller).
+      if (experimental_pid_no_breakaway_) {
+        mimo_pid_.reset();
+      } else {
+        mimo_ladrc_.reset_to_measurement(measured_body);
+      }
       mimo_was_ready_ = true;
     }
 
-    // Measured-current mode: no stopping acceleration feedforward.
-    // The zero-speed target is tracked by the unmodified LADRC law.
-    // Only the legacy commanded-current experiment uses its old stop FF.
+    // No stop feedforward for either continuously controlled experiment.
+    // Only the legacy commanded-current LADRC experiment keeps its old FF.
     mimo::Vec2 body_stop_ff{{0.0, 0.0}};
-    if (!experimental_actual_current_) {
+    if (!experimental_actual_current_ && !experimental_pid_no_breakaway_) {
       constexpr double STOP_DECEL_RAD_S2 = 15.625;
       const mimo::Vec2 wheel_stop_ff = {{
         normal_stop_ramp_active_ && std::abs(control_ref_l) > 1.0e-6 ?
@@ -1248,14 +1280,32 @@ hardware_interface::return_type Zlac8015dSystemHardware::write(
           -std::copysign(STOP_DECEL_RAD_S2, control_ref_r) : 0.0}};
       body_stop_ff = mimo_model_.wheel_to_body(wheel_stop_ff);
     }
-    const auto raw = mimo_ladrc_.step(
-      mimo_model_, reference_body, measured_body, eso_current_input,
-      dt, mimo_wc_, mimo_wo_, body_stop_ff);
+
+    mimo::Vec2 raw{{0.0, 0.0}};
+    if (experimental_pid_no_breakaway_) {
+      // Existing MIMO-PID: P/I at the control loop rate, filtered
+      // derivative only when a fresh TPDO0 velocity timestamp arrives.
+      // Conditional anti-windup uses the same 8 A cap as the LADRC case.
+      // Integral action stays enabled at zero reference as well.
+      raw = mimo_pid_.step(
+        mimo_model_, reference_body, measured_body, dt,
+        mimo_pid_kp_, mimo_pid_ki_, mimo_pid_kd_,
+        pid_derivative_filter_tau_s_, no_breakaway_current_limit_a_,
+        mimo::Vec2{{0.0, 0.0}}, true, last_velocity_feedback_time_);
+      // MIMO-PID has NO disturbance observer. Diagnostic states only;
+      // never interpret z2 columns as estimated disturbances in PID mode.
+      mimo_ladrc_.z1 = measured_body;
+      mimo_ladrc_.z2 = {{0.0, 0.0}};
+    } else {
+      raw = mimo_ladrc_.step(
+        mimo_model_, reference_body, measured_body, eso_current_input,
+        dt, mimo_wc_, mimo_wo_, body_stop_ff);
+    }
 
     if (!std::isfinite(raw[0]) || !std::isfinite(raw[1])) {
       RCLCPP_ERROR(
         rclcpp::get_logger("Zlac8015dSystemHardware"),
-        "Non-finite experimental LADRC current; commanding zero.");
+        "Non-finite experimental MIMO LADRC/PID current; commanding zero.");
       send_zero_command();
       return hardware_interface::return_type::ERROR;
     }
@@ -1273,18 +1323,26 @@ hardware_interface::return_type Zlac8015dSystemHardware::write(
     cmd_l = clamp(cmd_l, -imax, imax);
     cmd_r = clamp(cmd_r, -imax, imax);
 
-    // No startup current floor: the command is always generated by
-    // the LADRC formula (subject only to current and slew limits).
+    // No startup current floor, no stop current override. The selected
+    // MIMO controller generates all normal currents; the common hard
+    // current/acceleration safety bounds and slew limit still apply.
     left_ladrc_.tracking = true;
     right_ladrc_.tracking = true;
-    const auto estimated_wheels =
-      mimo_model_.body_to_wheel(mimo_ladrc_.z1);
-    const auto disturbance_wheels =
-      mimo_model_.body_to_wheel(mimo_ladrc_.z2);
-    left_ladrc_.z1 = estimated_wheels[0];
-    right_ladrc_.z1 = estimated_wheels[1];
-    left_ladrc_.z2 = disturbance_wheels[0];
-    right_ladrc_.z2 = disturbance_wheels[1];
+    if (experimental_pid_no_breakaway_) {
+      left_ladrc_.z1 = hw_velocities_[0];
+      right_ladrc_.z1 = hw_velocities_[1];
+      left_ladrc_.z2 = 0.0;
+      right_ladrc_.z2 = 0.0;
+    } else {
+      const auto estimated_wheels =
+        mimo_model_.body_to_wheel(mimo_ladrc_.z1);
+      const auto disturbance_wheels =
+        mimo_model_.body_to_wheel(mimo_ladrc_.z2);
+      left_ladrc_.z1 = estimated_wheels[0];
+      right_ladrc_.z1 = estimated_wheels[1];
+      left_ladrc_.z2 = disturbance_wheels[0];
+      right_ladrc_.z2 = disturbance_wheels[1];
+    }
 
     return send_experimental(cmd_l, cmd_r);
   }
