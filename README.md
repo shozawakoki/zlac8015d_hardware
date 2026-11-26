@@ -1,4 +1,16 @@
-# 実験版：静止状態からMIMO-LADRCで直接発進（BREAKAWAYなし）
+# 実験版：MIMO-LADRC / MIMO-PIDの発進から停止まで連続制御
+
+## 追加：比較用 MIMO-PID（BREAKAWAYなし・停止まで一貫制御）
+
+`ZLAC_CONTROL_MODE=mimo_pid_no_breakaway` を指定すると、既存の機体座標MIMO-PIDで発進・巡行・旋回・ゼロ速度への停止を一貫して制御します。停止用減速ランプ、停止用加速度フィードフォワード、ZERO HOLDを通さず、PIDの積分状態・微分フィルタ状態を保ったまま`/cmd_vel=0`にも追従します。
+
+比較対象の`mimo_ladrc_no_breakaway_actual_current`も同じゼロ速度目標への連続制御です。両者は電流指令の上限8 A/輪、変化率20 A/s、速度・電流フィードバック監視30 ms、車輪周速度2.0 m/sで0 Aラッチなどを共有し、既存のゲインとパラメータは変更しません。
+
+MIMO-PIDのゲインは`Kp_v=Kp_omega=0.7`、`Ki_v=Ki_omega=0.5`、`Kd_v=Kd_omega=0.03`、微分フィルタ`tau=0.05s`（URDFで定義した既定値）。**停止時の従来1.0 m/s²の減速参照制限がなくなるため、独立した非常停止を準備し、車輪浮上・低速で安全を検証してください。**
+
+比較条件・ビルド・オフラインテスト・計測CSVについては [MIMO_PID_NO_BREAKAWAY_COMPARISON.md](MIMO_PID_NO_BREAKAWAY_COMPARISON.md) を参照してください。
+
+---
 
 ## 追加：ESOに実電流を入力する比較実験
 
