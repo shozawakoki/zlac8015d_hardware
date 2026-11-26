@@ -34,6 +34,11 @@ if(BUILD_TESTING)
   target_include_directories(test_no_breakaway_ladrc PRIVATE include)
   target_compile_features(test_no_breakaway_ladrc PRIVATE cxx_std_17)
   add_test(NAME test_no_breakaway_ladrc COMMAND test_no_breakaway_ladrc)
+
+  add_executable(test_no_breakaway_pid tests/test_no_breakaway_pid.cpp)
+  target_include_directories(test_no_breakaway_pid PRIVATE include)
+  target_compile_features(test_no_breakaway_pid PRIVATE cxx_std_17)
+  add_test(NAME test_no_breakaway_pid COMMAND test_no_breakaway_pid)
 endif()
 
 ament_package()
