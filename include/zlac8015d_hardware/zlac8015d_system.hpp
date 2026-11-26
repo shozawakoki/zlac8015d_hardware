@@ -125,6 +125,9 @@ private:
   // Opt-in experiment: TPDO1 actual current drives the MIMO-LESO input.
   // The original no-BREAKAWAY experiment remains commanded-current based.
   bool experimental_actual_current_{false};
+  // Optional control-mode comparison: MIMO-PID from start through zero-speed
+  // stopping. Reuses the no-BREAKAWAY current and overspeed protection.
+  bool experimental_pid_no_breakaway_{false};
   double no_breakaway_current_limit_a_{8.0};
   // Latches until hardware controller reactivation (not cleared by cmd_vel=0).
   bool no_breakaway_overspeed_latched_{false};
